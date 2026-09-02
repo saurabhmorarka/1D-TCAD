@@ -266,3 +266,147 @@ test worth writing *before* the corresponding piece of physics, not after:
 
 To run the simulator as-is: `python3 main.py` (requires `numpy`, `scipy`,
 `matplotlib`); see `README.md` for details.
+
+## 8. Session 2: input file, and a faster coupled Newton solver
+
+Two follow-on requests: (1) move all simulation parameters into a separate,
+user-editable input file rather than hardcoded Python, so anyone can rerun
+the tool with different doping/geometry/voltage sweep without touching code;
+(2) the Gummel iteration felt slow to converge - investigate faster
+alternatives and report a runtime comparison.
+
+### 8.1 Input file (`input.yaml` + `config.py`)
+
+`input.yaml` now holds doping (`Na_cm3`, `Nd_cm3`), device thickness
+(`Wp_um`, `Wn_um`, or `null` to keep mesh.py's auto-sizing), the voltage
+sweep range, and which solver to use (`solver.math_model: gummel | newton`
+- see below). `config.py` loads it and overrides the `Material`/`Device`
+defaults from `params.py`; `main.py` reads its sweep and solver choice from
+there instead of hardcoding them. YAML (via `pyyaml`, added as a
+dependency) was chosen over JSON specifically so the file can carry inline
+comments explaining each field - it's meant to be hand-edited.
+
+### 8.2 A faster solver: fully coupled Newton instead of Gummel iteration
+
+Gummel iteration is a *decoupled* fixed-point map (solve continuity for n,
+then p, given psi; re-solve Poisson given n and p; repeat) and only
+converges linearly - each outer iteration reduces the error by roughly a
+constant factor, which is why it needed 30-300 iterations per bias point in
+session 1. The standard fix is to instead solve Poisson and both continuity
+equations as **one coupled nonlinear system** with Newton's method, which
+converges *quadratically* near the solution (each iteration roughly squares
+the error), needing far fewer outer iterations - at the cost of each
+iteration being more expensive (a 3N-unknown linear solve instead of two
+N-unknown ones). This is genuinely new work, not a tuning tweak, and it took
+three attempts to get right - each attempt's failure was diagnostic, in
+keeping with the project's running debugging discipline.
+
+**Attempt 1: Jacobian-free Newton-Krylov (`scipy.optimize.newton_krylov`).**
+The appeal was avoiding hand-deriving a Jacobian - just write the residual
+and let Krylov (GMRES) iterations approximate the Newton step. It did not
+converge at all: the residual norm stayed flat (~1e10) over 60 iterations
+regardless of the starting guess. The root cause, found by inspecting which
+mesh node dominated the residual, was **the mesh itself**: `mesh.py`'s
+grid generator could leave a tiny leftover sliver at a domain boundary
+(discovered value: 1.9e-7 cm next to a 6.5e-6 cm neighbor, a >30x jump) when
+the geometric spacing sequence didn't evenly divide the requested region
+length. That's a real, general mesh-quality bug - the tiny cell gives a
+Scharfetter-Gummel flux coefficient `q*D/h` that's enormous, which Gummel's
+tridiagonal linear solves tolerated silently (same underlying issue as the
+"boundary-edge current artifact" from session 1) but which is exactly the
+kind of severe multi-scale ill-conditioning that plain, unpreconditioned
+Krylov iteration cannot handle. Fixed by regrading `mesh._one_sided_nodes`
+so it never creates a segment smaller than half a step - if the remaining
+distance to the boundary is under `0.5*h`, it's absorbed into landing
+exactly on the boundary instead of becoming its own sliver segment.
+
+Fixing the mesh did **not** fix Newton-Krylov, though: the residual moved
+to a different node (now the finest cell at the junction, where the
+diffusion coefficient `D/h^2` is inherently large by construction, not a
+bug) and still didn't decrease. This confirmed the deeper issue: the
+discretization is intrinsically stiff (h spans ~2 orders of magnitude
+between the junction and the bulk), and plain GMRES without a
+physics-based preconditioner cannot make progress on that conditioning.
+Building a proper preconditioner was judged not worth the complexity when
+a more standard alternative was available (see attempt 2).
+
+**Attempt 2: analytic Jacobian, direct sparse solve.** Rather than fight
+Krylov conditioning, hand-derive the exact Jacobian (Poisson's row is
+linear in `(psi, n, p)` by construction when those are the unknowns
+directly, rather than via Boltzmann quasi-Fermi levels - only the
+continuity rows are nonlinear, through the Bernoulli-function SG flux and
+SRH recombination) and solve each Newton step with a direct sparse LU
+(`scipy.sparse.linalg.spsolve`), which doesn't care about the conditioning
+the way an unpreconditioned iterative solve does. This needed a new
+`bernoulli_deriv` (dB/dx for the Bernoulli function), validated against a
+finite-difference derivative before use (matched to ~1e-9 - the same
+"validate the building block first" discipline as session 1's SG flux
+fix). Deriving the ~20-term Jacobian by hand for the coupled 3-equation
+system was error-prone: a first attempt had several row/column
+index-mapping mistakes (mixing up which of an edge's two nodes a given
+partial derivative belonged to). These were **not** caught by inspection -
+they were caught by a random-direction finite-difference check
+(`J @ v` vs. `(F(U+eps*v)-F(U-eps*v))/(2*eps)` for random `v`), which is
+now the standard way any Jacobian in this codebase should be checked before
+it's trusted in a solver loop. After that check passed (relative error
+~1e-6, consistent with finite-difference truncation), Newton converged in
+the expected 5-15 iterations with genuinely quadratic behavior visible in
+the residual trace (e.g. 5.9e9 -> 2.5e8 -> 1.3e6 -> 3.5 -> 5.5e-3 in five
+steps) - but wall-clock time was *slower* than Gummel, because the
+Jacobian assembly used a Python-level `for` loop over every interior node
+and the line search rebuilt the full Jacobian on every trial step, not
+just the accepted one.
+
+**Attempt 3 (final): vectorize, and stop rebuilding the Jacobian during
+line search.** The assembly loop was rewritten with numpy array indexing
+(same style as the vectorized Poisson/continuity assembly from session 1)
+instead of a per-node Python loop, and a separate `_residual_only` fast
+path was added for line-search trial evaluations, so the (expensive)
+Jacobian is only rebuilt once a step is actually accepted. This flipped the
+result: Newton became consistently **~2.6x-5x faster in wall-clock time**
+than Gummel across the bias sweep, using roughly 5x fewer outer iterations,
+while matching Gummel's current to 4+ significant figures.
+
+Two more robustness issues turned up wiring this into the full voltage
+sweep (both diagnosed with the same "find the specific failing point,
+don't guess" approach as session 1's bugs):
+
+- **Stall detection needed to check the residual size, not just that the
+  line search collapsed.** A backtracking line search that can no longer
+  find a better step usually means convergence (once the step floor is hit
+  right at the solution), but it can also mean a genuine failure to
+  converge from a bad starting point, and the original stall check
+  couldn't tell these apart - it accepted both. Fixed by only treating a
+  stall as "done" when the residual is also below a sanity threshold;
+  above it, the solve reports a warning (via `warnings.warn`, matching the
+  self-consistency-check style the rest of the codebase uses to surface
+  problems, rather than either silently returning a wrong answer or
+  aborting an entire multi-point sweep over one difficult bias point).
+- **The voltage sweep's own initial-guess handling was undermining
+  Newton's cold-start fallback.** `newton_gummel_solve` has a fallback for
+  when it has no previous-point solution to warm-start from (run a handful
+  of cheap Gummel iterations first to reach a good starting point, then
+  switch to Newton) - but `solver.voltage_sweep` was always passing an
+  explicit initial guess (the equilibrium solution, unchanged) even for the
+  very first sweep point, so that fallback's "no previous solution"
+  check (`psi_init is None`) never actually triggered, and the guess it
+  passed instead turned out to be worse than either solver's own default.
+  Fixed by having `voltage_sweep` pass `None` for the first point so each
+  solver falls back to its own appropriate from-scratch guess, and only
+  pass the real previous-point solution once one exists.
+
+`solver.py`'s `voltage_sweep` now takes a `method="gummel"|"newton"`
+argument and shares its continuation/bookkeeping logic between both
+solvers, so they're directly comparable point-by-point; `main.py` runs both
+across the full sweep specifically to produce that comparison
+(`out/05_solver_benchmark.png`, `out/solver_benchmark.csv`) regardless of
+which one `input.yaml` selects for the "primary" results.
+
+**Lesson**, consistent with session 1's: a faster/more sophisticated
+numerical method is not a drop-in swap. Each of the three attempts above
+failed for a specific, diagnosable reason (a mesh defect, then intrinsic
+stiffness defeating an unpreconditioned iterative method, then a
+performance bug in an otherwise-correct implementation, then two
+robustness gaps in the surrounding sweep logic) - and each was found by
+building a small, targeted check (which mesh edge, which Jacobian entry,
+which residual node) rather than by tuning parameters and hoping.

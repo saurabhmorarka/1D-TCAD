@@ -42,6 +42,28 @@ def bernoulli(x: np.ndarray) -> np.ndarray:
     return out
 
 
+def bernoulli_deriv(x: np.ndarray) -> np.ndarray:
+    """dB/dx for the Bernoulli function B(x) = x/(exp(x)-1), needed for the
+    analytic Newton Jacobian of the Scharfetter-Gummel flux."""
+    x = np.asarray(x, dtype=float)
+    out = np.empty_like(x)
+
+    small = np.abs(x) < 1e-8
+    out[small] = -0.5 + x[small] / 6.0  # Taylor series of B'(x) near 0
+
+    big_pos = x > 40.0
+    out[big_pos] = (1.0 - x[big_pos]) * np.exp(-x[big_pos])  # B(x)~x*e^-x here
+
+    big_neg = x < -40.0
+    out[big_neg] = -1.0  # B(x) ~ -x here
+
+    mid = ~(small | big_pos | big_neg)
+    xm = x[mid]
+    denom = np.expm1(xm)
+    out[mid] = (denom - xm * np.exp(xm)) / denom ** 2
+    return out
+
+
 def equilibrium_bulk_potential(mat: Material, Cdop: float) -> float:
     """Exact charge-neutral bulk potential (psi with n=p=ni at psi=0) for a
     given net doping Cdop = Nd-Na, solving n0-p0=Cdop, n0*p0=ni^2 exactly

@@ -1,4 +1,6 @@
 """Equilibrium solve and Gummel-map drift-diffusion bias sweep."""
+import time
+
 import numpy as np
 
 from params import Q, Material, Device
@@ -123,26 +125,47 @@ def gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
     }
 
 
-def voltage_sweep(x, Cdop, mat: Material, dev: Device, Va_list, verbose=False):
+def voltage_sweep(x, Cdop, mat: Material, dev: Device, Va_list, verbose=False, method="gummel"):
     """Sweep applied bias with solution continuation (each point initialized
-    from the previous converged solution for robustness/speed)."""
+    from the previous converged solution for robustness/speed).
+
+    method: "gummel" (decoupled Gummel iteration) or "newton" (fully coupled
+    Newton-Krylov with analytic Jacobian, see newton_solver.py) - both share
+    this same continuation/bookkeeping wrapper so they're directly
+    comparable point-by-point.
+    """
+    if method == "gummel":
+        solve_fn = gummel_solve
+    elif method == "newton":
+        from newton_solver import newton_gummel_solve
+        solve_fn = newton_gummel_solve
+    else:
+        raise ValueError(f"method must be 'gummel' or 'newton', got {method!r}")
+
     psi_eq, n_eq, p_eq, _ = solve_equilibrium(x, Cdop, mat)
 
     results = []
-    psi_prev = psi_eq.copy()
-    phin_prev = np.zeros_like(x)
-    phip_prev = np.zeros_like(x)
+    # None for the first point, so each solver falls back to its own
+    # from-scratch initial guess (for Newton, that includes a Gummel warm
+    # start - see newton_solver.py). Passing an explicit equilibrium-based
+    # guess even for the first point (as this used to do) skips that
+    # fallback and can be a substantially worse starting point, especially
+    # far from equilibrium (e.g. the first point of a reverse-bias-heavy
+    # sweep).
+    psi_prev = phin_prev = phip_prev = None
 
     for Va in Va_list:
-        res = gummel_solve(x, Cdop, mat, Va, psi_eq, n_eq, p_eq,
-                            psi_init=psi_prev, phin_init=phin_prev, phip_init=phip_prev,
-                            verbose=verbose)
+        t0 = time.perf_counter()
+        res = solve_fn(x, Cdop, mat, Va, psi_eq, n_eq, p_eq,
+                        psi_init=psi_prev, phin_init=phin_prev, phip_init=phip_prev,
+                        verbose=verbose)
+        res["solve_time_s"] = time.perf_counter() - t0
         res["Va"] = Va
         res["I"] = res["J_mean"] * dev.area
         results.append(res)
         psi_prev, phin_prev, phip_prev = res["psi"], res["phin"], res["phip"]
         if verbose:
-            print(f"Va={Va:+.3f} V  I={res['I']:.6e} A  "
-                  f"(Gummel iters={res['iters']}, J std/mean={res['J_std']/max(abs(res['J_mean']),1e-30):.2e})")
+            print(f"Va={Va:+.3f} V  I={res['I']:.6e} A  t={res['solve_time_s']:.4f}s "
+                  f"({method} iters={res['iters']}, J std/mean={res['J_std']/max(abs(res['J_mean']),1e-30):.2e})")
 
     return psi_eq, n_eq, p_eq, results

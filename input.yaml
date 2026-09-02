@@ -1,0 +1,34 @@
+# 1D Diode simulation input parameters.
+#
+# Every value here overrides the corresponding default in params.py. Delete
+# a key (or set it to null where supported) to fall back to the default.
+
+doping:
+  Na_cm3: 1.0e17     # p-side acceptor doping, cm^-3
+  Nd_cm3: 1.0e16     # n-side donor doping, cm^-3
+
+thickness:
+  # p-side / n-side quasi-neutral region length, in micrometers.
+  # Leave as null to auto-size each side to ~5x the minority-carrier
+  # diffusion length (see mesh.py: build_grid).
+  Wp_um: null
+  Wn_um: null
+
+voltage_sweep:
+  reverse_start_V: -2.0
+  reverse_stop_V: -0.05
+  reverse_points: 10
+  forward_start_V: 0.0
+  forward_stop_V: 0.65
+  forward_points: 27
+
+solver:
+  # Which numerical method solves the coupled Poisson + continuity system
+  # at each bias point:
+  #   gummel  - decoupled Gummel iteration (continuity solves alternated
+  #             with a Poisson re-solve). Robust, but can take many outer
+  #             iterations (slow, roughly linear convergence).
+  #   newton  - fully coupled Newton-Krylov solve of Poisson + both
+  #             continuity equations simultaneously (quadratic convergence,
+  #             far fewer outer iterations; each iteration costs more).
+  math_model: gummel

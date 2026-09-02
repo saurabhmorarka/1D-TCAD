@@ -10,25 +10,35 @@ scratch in Python/NumPy/SciPy.
 - Solves the **equilibrium** nonlinear Poisson equation (Newton's method) for
   the self-consistent built-in potential and space-charge profile.
 - Solves the **biased** drift-diffusion system (Poisson + electron/hole
-  continuity, Scharfetter-Gummel discretization) via Gummel iteration,
-  sweeping applied voltage forward and reverse.
+  continuity, Scharfetter-Gummel discretization), sweeping applied voltage
+  forward and reverse, using either of two interchangeable solvers:
+  - **Gummel iteration**: decoupled, robust, linear convergence (many outer
+    iterations).
+  - **Coupled Newton**: all three equations (Poisson + both continuity
+    equations) solved together with an analytic sparse Jacobian and a direct
+    sparse solve per step, quadratic convergence (few outer iterations,
+    ~4x faster wall-clock - see `out/05_solver_benchmark.png`).
 - Compares against closed-form theory: built-in potential
   `Vbi = Vt*ln(Na*Nd/ni^2)`, the depletion approximation, and the Shockley
   long-base ideal diode law `I = I0*(exp(V/Vt)-1)`.
 
-Doping (Na, Nd), mobility, SRH lifetime, and the voltage sweep range are all
-parameters in `params.py` / `main.py`.
+All simulation parameters (doping, device thickness, voltage sweep range,
+which solver to use) are read from `input.yaml`, not hardcoded - edit that
+file to change them. `params.py` just holds the defaults it overrides.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `params.py` | Physical constants and material/device parameters |
+| `input.yaml` | **Edit this** to change doping, thickness, voltage sweep, or solver (`math_model: gummel` \| `newton`) |
+| `config.py` | Loads `input.yaml` and builds the `Material`/`Device`/voltage-sweep/solver-choice overrides from it |
+| `params.py` | Physical constants and material/device parameter defaults |
 | `mesh.py` | Nonuniform grid generator |
-| `physics.py` | Bernoulli function, nonlinear Poisson (Newton), Scharfetter-Gummel continuity solves |
+| `physics.py` | Bernoulli function (+ its derivative), nonlinear Poisson (Newton), Scharfetter-Gummel continuity solves |
 | `analytic.py` | Closed-form comparisons (Vbi, depletion width, Shockley law) |
-| `solver.py` | Equilibrium solve + Gummel-iteration bias sweep |
-| `main.py` | Driver: runs the sweep, generates plots and `iv_sweep.csv` in `out/` |
+| `solver.py` | Equilibrium solve + bias sweep (dispatches to either solver below) |
+| `newton_solver.py` | Fully coupled Newton solve: analytic sparse Jacobian, direct sparse solve, backtracking line search |
+| `main.py` | Driver: runs the sweep with both solvers (for the benchmark) plus the one from `input.yaml`, generates plots and CSVs in `out/` |
 
 ## Running
 
@@ -36,7 +46,7 @@ parameters in `params.py` / `main.py`.
 python3 main.py
 ```
 
-Requires `numpy`, `scipy`, `matplotlib`. Output plots and `iv_sweep.csv` are
+Requires `numpy`, `scipy`, `matplotlib`, `pyyaml`. Output plots and CSVs are
 written to `out/`.
 
 ## Results
@@ -55,3 +65,6 @@ The simulation reproduces standard diode physics:
 - Reverse leakage current is orders of magnitude above the ideal Shockley
   I0, correctly reflecting depletion-region generation current that the
   simple long-base ideal-diode formula does not model.
+- The coupled Newton solver matches Gummel's current to ~4 significant
+  figures at every bias point while using roughly 5x fewer outer iterations
+  (quadratic vs. linear convergence) and running about 4x faster overall.

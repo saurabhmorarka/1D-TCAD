@@ -26,8 +26,15 @@ def _one_sided_nodes(length: float, h_min: float, h_max: float, growth: float) -
     x = 0.0
     while x < length:
         x_next = x + h
-        if x_next > length:
-            x_next = length
+        remaining_after = length - x_next
+        if remaining_after <= 0.5 * h:
+            # The final step would either overshoot or leave a tiny sliver
+            # smaller than half a step (a huge, ill-conditioned
+            # Scharfetter-Gummel flux coefficient q*D/h waiting to happen).
+            # Land exactly on `length` instead of adding that sliver as its
+            # own segment.
+            xs.append(length)
+            break
         xs.append(x_next)
         x = x_next
         h = min(h * growth, h_max)

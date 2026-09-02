@@ -6,21 +6,24 @@ Scharfetter-Gummel drift-diffusion solver (Gummel iteration). Compares
 results against closed-form expressions: built-in potential, depletion
 approximation, and the Shockley ideal-diode law.
 
-Edit the Material()/Device() calls below to change doping, mobility,
-lifetime, or voltage sweep range.
+Doping, mobility, lifetime, and voltage sweep range are read from
+input.yaml (see config.py) - edit that file rather than this one to change
+the simulation's parameters. Material()/Device() here are just the defaults
+input.yaml overrides.
 """
 import csv
 import os
+import time
 
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from params import Material, Device
 from mesh import build_grid
 from solver import solve_equilibrium, voltage_sweep
 import analytic as an
+import config as cfg
 
 OUT = os.path.join(os.path.dirname(__file__), "out")
 os.makedirs(OUT, exist_ok=True)
@@ -32,8 +35,10 @@ C_GRID = "#c9c9c9"
 
 
 def main():
-    mat = Material()
-    dev = Device()
+    input_cfg = cfg.load_config()
+    mat, dev, Va_list, math_model = cfg.build_from_config(input_cfg)
+    print(f"Loaded input.yaml (solver.math_model={math_model!r})" if input_cfg
+          else "No input.yaml found - using params.py defaults")
 
     g = build_grid(mat, dev)
     x, Cdop = g["x"], g["Cdop"]
@@ -53,13 +58,9 @@ def main():
     print(f"  Depletion width (analytic, step-junction approx): xp={xp_an*1e4:.4f} um, "
           f"xn={xn_an*1e4:.4f} um, W={W_an*1e4:.4f} um")
 
-    # ---- Voltage sweep ----
-    Va_rev = np.linspace(-2.0, -0.05, 10)
-    Va_fwd = np.linspace(0.0, 0.65, 27)
-    Va_list = np.concatenate([Va_rev, Va_fwd])
-
-    print("\nRunning bias sweep (Gummel drift-diffusion solve per point)...")
-    _, _, _, results = voltage_sweep(x, Cdop, mat, dev, Va_list, verbose=False)
+    # ---- Voltage sweep (solver chosen by input.yaml: solver.math_model) ----
+    print(f"\nRunning bias sweep ({math_model} drift-diffusion solve per point)...")
+    _, _, _, results = voltage_sweep(x, Cdop, mat, dev, Va_list, verbose=False, method=math_model)
 
     Va_arr = np.array([r["Va"] for r in results])
     I_num = np.array([r["I"] for r in results])
@@ -170,6 +171,63 @@ def main():
     fig.savefig(os.path.join(OUT, "04_ideality_factor.png"), dpi=150)
     plt.close(fig)
 
+    # ================= Solver runtime benchmark: Gummel vs Newton =================
+    # Runs BOTH solvers across the same voltage sweep (independent of which one
+    # produced the results/plots above) so their wall-clock cost is directly
+    # comparable point-by-point, not just at one bias.
+    print("\nBenchmarking solvers (Gummel iteration vs coupled Newton) across the full sweep...")
+    bench = {}
+    for method in ("gummel", "newton"):
+        t0 = time.perf_counter()
+        _, _, _, bres = voltage_sweep(x, Cdop, mat, dev, Va_list, verbose=False, method=method)
+        total_t = time.perf_counter() - t0
+        bench[method] = {
+            "results": bres,
+            "total_time": total_t,
+            "times": np.array([r["solve_time_s"] for r in bres]),
+            "iters": np.array([r["iters"] for r in bres]),
+        }
+        print(f"  {method:8s}: total={total_t:.3f}s over {len(Va_list)} points "
+              f"(avg {total_t/len(Va_list)*1e3:.1f} ms/point, "
+              f"avg {bench[method]['iters'].mean():.1f} iters/point)")
+
+    speedup = bench["gummel"]["total_time"] / bench["newton"]["total_time"]
+    print(f"  Newton is {speedup:.2f}x faster than Gummel over the full sweep "
+          f"({bench['gummel']['total_time']:.3f}s vs {bench['newton']['total_time']:.3f}s)")
+
+    # 5. Solver benchmark plot: per-point time and iteration count, Gummel vs Newton
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8))
+    ax = axes[0]
+    ax.plot(Va_arr, bench["gummel"]["times"] * 1e3, color=C_AN, lw=2, marker="o", ms=3, label="Gummel")
+    ax.plot(Va_arr, bench["newton"]["times"] * 1e3, color=C_NUM, lw=2, marker="o", ms=3, label="Newton (coupled)")
+    ax.set_xlabel("Applied voltage Va (V)")
+    ax.set_ylabel("Solve time per bias point (ms)")
+    ax.set_title(f"Per-point solve time  (total: Gummel {bench['gummel']['total_time']:.2f}s, "
+                 f"Newton {bench['newton']['total_time']:.2f}s, {speedup:.1f}x speedup)")
+    ax.legend()
+    ax.grid(alpha=0.3, color=C_GRID)
+
+    ax = axes[1]
+    ax.plot(Va_arr, bench["gummel"]["iters"], color=C_AN, lw=2, marker="o", ms=3, label="Gummel")
+    ax.plot(Va_arr, bench["newton"]["iters"], color=C_NUM, lw=2, marker="o", ms=3, label="Newton (coupled)")
+    ax.set_xlabel("Applied voltage Va (V)")
+    ax.set_ylabel("Outer iterations to converge")
+    ax.set_title("Iteration count  (Newton: quadratic convergence; Gummel: linear)")
+    ax.legend()
+    ax.grid(alpha=0.3, color=C_GRID)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "05_solver_benchmark.png"), dpi=150)
+    plt.close(fig)
+
+    bench_csv = os.path.join(OUT, "solver_benchmark.csv")
+    with open(bench_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["Va_V", "gummel_time_s", "gummel_iters", "newton_time_s", "newton_iters"])
+        for i, Va in enumerate(Va_arr):
+            w.writerow([f"{Va:.4f}",
+                        f"{bench['gummel']['times'][i]:.5f}", bench["gummel"]["iters"][i],
+                        f"{bench['newton']['times'][i]:.5f}", bench["newton"]["iters"][i]])
+
     # ---- CSV export ----
     csv_path = os.path.join(OUT, "iv_sweep.csv")
     with open(csv_path, "w", newline="") as f:
@@ -184,7 +242,9 @@ def main():
     print("  02_carrier_profiles.png")
     print("  03_iv_curve.png")
     print("  04_ideality_factor.png")
+    print("  05_solver_benchmark.png")
     print("  iv_sweep.csv")
+    print("  solver_benchmark.csv")
 
 
 if __name__ == "__main__":
