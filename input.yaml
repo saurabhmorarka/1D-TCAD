@@ -19,8 +19,8 @@ voltage_sweep:
   reverse_stop_V: -0.05
   reverse_points: 10
   forward_start_V: 0.0
-  forward_stop_V: 0.65
-  forward_points: 27
+  forward_stop_V: 1.2
+  forward_points: 49
 
 solver:
   # Which numerical method solves the coupled Poisson + continuity system
@@ -28,7 +28,8 @@ solver:
   #   gummel  - decoupled Gummel iteration (continuity solves alternated
   #             with a Poisson re-solve). Robust, but can take many outer
   #             iterations (slow, roughly linear convergence).
-  #   newton  - fully coupled Newton-Krylov solve of Poisson + both
-  #             continuity equations simultaneously (quadratic convergence,
-  #             far fewer outer iterations; each iteration costs more).
+  #   newton  - fully coupled Newton solve of Poisson + both continuity
+  #             equations simultaneously (analytic sparse Jacobian, direct
+  #             sparse solve; quadratic convergence, far fewer outer
+  #             iterations; each iteration costs more).
   math_model: gummel

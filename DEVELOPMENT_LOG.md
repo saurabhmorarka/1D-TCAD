@@ -410,3 +410,48 @@ performance bug in an otherwise-correct implementation, then two
 robustness gaps in the surrounding sweep logic) - and each was found by
 building a small, targeted check (which mesh edge, which Jacobian entry,
 which residual node) rather than by tuning parameters and hoping.
+
+### 8.3 Stress-testing the comparison: forward bias up to 1.2 V (high injection)
+
+`input.yaml`'s `voltage_sweep.forward_stop_V` was pushed from 0.65 V to
+1.2 V - well past the built-in potential (0.7738 V) and into a regime the
+model isn't really designed for (the ohmic contacts are pinned to their
+equilibrium majority-carrier concentration with no series resistance, so
+there's nothing in the physics to stop the exponential once the junction
+approaches flat-band other than the numerics themselves), specifically to
+put real stress on the Gummel-vs-Newton comparison rather than only testing
+it in the well-behaved low-to-mid-bias range.
+
+The result was the clearest evidence yet for the coupled Newton solver:
+in the 0.80-0.95 V band, **Gummel iteration hit its 300-iteration cap
+without fully converging** (self-consistency, the J_std/J_mean spread
+across interior mesh edges that should be ~0 in true steady state, degraded
+to 0.5-7.2% there - visibly worse than the <0.01% it achieves everywhere
+else), while **Newton converged cleanly in 7-10 iterations with
+self-consistency at essentially machine precision (0.0000%) throughout the
+same band**. Total sweep time: Gummel 4.39 s, Newton 0.44 s - a 9.9x
+speedup (up from ~4.25x over the milder 0.65 V sweep in section 8.2),
+because Gummel's iteration count itself roughly doubled in the hard region
+(up to ~90 iterations/point average, spiking to the 300 cap) while
+Newton's stayed flat at 5-15 iterations throughout the entire sweep,
+reverse bias included. See `out/05_solver_benchmark.png` for the iteration
+count and per-point solve time visibly spiking for Gummel and staying flat
+for Newton, and `out/gummel_vs_newton_comparison.csv` for the full
+point-by-point comparison (current, iteration count, solve time, and
+self-consistency for both solvers side by side).
+
+Where Gummel didn't fully converge, its current disagreed with Newton's by
+up to ~1.6% (e.g. 0.039359 A vs 0.038830 A at 0.85 V) - given Newton's
+self-consistency is essentially exact there and Gummel's is not, Newton's
+answer is the more trustworthy one in that band, not just the faster one.
+
+Physically, the sweep also shows why the Shockley ideal-diode law is only
+a low-injection approximation: the numeric current visibly saturates
+above ~0.8 V (reaching only ~0.21 A at 1.2 V) as the finite doping and
+lack of series resistance in this model limit how much current the
+junction can actually pass, while the naive exponential extrapolation of
+the ideal diode law diverges to a physically absurd ~3e6 A at 1.2 V (see
+`out/03_iv_curve.png`) - and the extracted ideality factor climbs well
+past n=2, up to about 12 at 1.2 V (`out/04_ideality_factor.png`), which is
+the expected signature of high-level injection rather than a numerical
+artifact.
