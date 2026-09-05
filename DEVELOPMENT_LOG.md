@@ -455,3 +455,192 @@ the ideal diode law diverges to a physically absurd ~3e6 A at 1.2 V (see
 past n=2, up to about 12 at 1.2 V (`out/04_ideality_factor.png`), which is
 the expected signature of high-level injection rather than a numerical
 artifact.
+
+## 9. Session 3: extending to a MOS capacitor C-V simulator
+
+New request: build a second device simulator, a 1D MOS capacitor (metal
+gate - thin oxide - uniform substrate, no source/drain), reusing the
+diode's structure, and compute its C-V curve compared against closed-form
+theory. Before writing code, the physics was scoped out loud first (per the
+standing preference recorded in this session's memory), specifically to
+settle one open question: does a MOS C-V curve need a genuine small-signal
+(AC) solve, or can it be done "quasi"?
+
+### 9.1 The key scoping insight: no current path changes everything
+
+A MOS capacitor has an insulating gate, so unlike the diode there is no
+steady-state current path at all - the whole structure sits at a single,
+uniform Fermi level at every DC gate voltage (exactly the diode's
+equilibrium case, `phin=phip=0` everywhere), *provided enough time has
+passed for generation-recombination to populate any inversion layer*. That
+turns out to settle the "small-signal or not" question cleanly:
+
+- **Low-frequency (quasi-static) C-V** needs no continuity equations, no
+  G-R kinetics, and no AC analysis at all - just a sequence of equilibrium
+  nonlinear-Poisson solves (`physics.solve_poisson`, reused as-is with an
+  oxide/semiconductor permittivity and intrinsic-concentration profile),
+  one per gate voltage, with `C(V_G) = dQ/dV_G` from numerically
+  differentiating the swept charge. This reuses the diode's equilibrium
+  solver almost unchanged.
+- **High-frequency C-V** (minority/inversion carriers can't follow a fast
+  probe signal) doesn't need a literal frequency-domain solve either - it's
+  a **quasi-small-signal** calculation: take the low-frequency solution's
+  minority-carrier density at a DC bias, freeze it, perturb V_G by a small
+  amount, and let only the majority carrier and potential respond. This is
+  the precise, per-point version of the textbook "high-frequency C-V"
+  definition (a real AC solve at intermediate frequencies, or the
+  frequency-dependent deep-depletion transient behavior from a fast sweep
+  with no S/D to supply carriers, would need real G-R kinetics and either
+  time-stepping or a complex-linear frequency-domain solve - deliberately
+  out of scope for this version).
+
+This meant most of the new work was building the right *structure*
+(mesh, permittivity, doping, boundary conditions) rather than a new solver
+algorithm - `physics.solve_poisson` needed generalizing (see 9.2) but not
+replacing.
+
+### 9.2 Generalizing `physics.solve_poisson` for a layered structure
+
+Three extensions to the diode's Poisson solver, all backward-compatible
+(the diode's calls, which pass scalars, are unaffected):
+
+- **`eps` as a per-edge array**, not just `mat.eps`: an oxide/semiconductor
+  stack needs a permittivity that's discontinuous at the interface, and
+  assigning it per mesh *edge* (not per node) is what makes the
+  finite-volume flux automatically enforce D-field continuity there, with
+  no special-cased interface treatment needed.
+- **`ni` as a per-node array**, not just `mat.ni`: setting `ni=0` in the
+  oxide makes `n=p=0` there identically (correct - an insulator has no
+  mobile carriers), including a correctly-zeroed Jacobian contribution,
+  with no separate "is this an oxide node" branching needed anywhere else
+  in the solver.
+- **`n_frozen`/`p_frozen`**: override one carrier's density to a fixed
+  array at selected nodes instead of the Boltzmann relation, for the
+  high-frequency trick above. Symmetric support for freezing either
+  carrier was added specifically because the user asked, mid-task, "what
+  if it were n-sub and you needed frozen-p mode... should be general
+  enough that nmos or pmos could be simulated" - the initial
+  implementation only had `n_frozen` (built with the p-substrate example in
+  mind), and generalizing it to accept either was a small, clean addition
+  once asked for, validated by testing an n-substrate case afterward and
+  confirming the threshold voltage and C-V curve come out as an exact
+  mirror image of the p-substrate case.
+
+Each new mechanism was checked in isolation before trusting it in the
+larger MOS-cap solve: freezing `n` at its equilibrium value and perturbing
+a boundary condition confirmed `n` stayed exactly frozen (0.0 relative
+difference) while `p` and `psi` responded, before any MOS-specific code
+used it.
+
+### 9.3 Three bugs, found the same way as session 1/2: build a small check, don't guess
+
+- **Gate boundary condition was missing the substrate's own reference
+  potential.** The first attempt set `psi(gate) = V_G - V_FB` directly.
+  At `V_G=0, V_FB=0` this gave 0.35 V of *spurious* band-bending, because
+  the substrate's own equilibrium potential (`psi_bulk`, referenced to the
+  intrinsic level) isn't zero - it's `-phi_F` for a p-substrate. Applied
+  gate voltage is relative to the substrate contact's own Fermi level (the
+  external "ground"), not the absolute intrinsic-level reference psi is
+  expressed in, so the correct BC is `psi(gate) = psi_bulk + (V_G - V_FB)`.
+  Caught by explicitly checking for flat bands at `V_G=0` with the ideal
+  `V_FB=0` assumption - it wasn't flat until the offset was added, and was
+  flat (surface potential ~1e-15) once it was.
+- **Semiconductor charge came out with the wrong sign.** Charge was
+  extracted from Gauss's law across the (charge-free, uniform-field) oxide,
+  but the first sign choice gave *negative* charge in accumulation, where
+  piled-up majority carriers (holes, for a p-substrate) must be net
+  *positive*. Caught the same way: compute a known case (strong
+  accumulation) and check the sign matches the obvious physical
+  expectation, rather than trusting the algebra. A second, related sign
+  bug followed immediately: capacitance is `-dQ_semiconductor/dV_G`, not
+  `+dQ_semiconductor/dV_G` - the semiconductor charge decreases
+  monotonically as `V_G` increases (accumulation to inversion), but
+  capacitance must be positive, since it's the *gate* charge
+  (`Q_gate=-Q_semiconductor`) that increases with `V_G` in the
+  conventional definition.
+- **Quasi-Fermi potentials showed a nonsensical +-18V spike right at the
+  oxide.** Requested mid-task ("plot the quasi fermi potentials in
+  non-equilibrium conditions for both diode and MOS-capacitor"), this
+  surfaced immediately on the first MOS plot: `phin`/`phip` are undefined
+  in an insulator (n=p=0 there identically, not some small-but-nonzero
+  value), but the formula divided by a dummy placeholder value there
+  instead of excluding those nodes, giving `Vt*ln(tiny/1.0) ~ -690*Vt`. Fixed
+  by masking `phin`/`phip` to NaN wherever `ni_arr==0` (oxide), so they
+  simply aren't plotted there - matplotlib skips NaN automatically. This is
+  the same class of mistake as session 1's ideality-factor formula bug: a
+  quantity that's mathematically well-defined everywhere the formula is
+  evaluated can still be *physically meaningless* in part of the domain,
+  and needs an explicit mask rather than relying on the numbers looking
+  reasonable.
+
+### 9.4 A real physical effect the mesh needed to be pushed to resolve
+
+The numeric low-frequency C-V matched the analytic depletion-approximation
+curve well in depletion, but sat visibly below the idealized `C=C_ox` in
+accumulation (0.86 x C_ox at strong accumulation with the initial mesh).
+Rather than assume this was mesh error to eliminate, it was checked with a
+convergence study: refining the near-interface spacing from ~0.82 nm down
+to ~0.004 nm converged the result smoothly to a stable ~0.843 x C_ox - not
+drifting further as the mesh refined, confirming it's a real effect (finite
+accumulation-layer screening length in series with C_ox, not the depletion
+approximation's idealized "perfect majority-carrier screening" assumption)
+that the *default* mesh simply hadn't been fine enough to resolve. The
+default `interface_spacing_debye_factor` for the MOS mesh was tightened
+from 0.02 to 0.001 as a result - the accumulation/inversion layers here can
+be much thinner than the bulk-doping Debye length that sizes the mesh,
+unlike the diode's depletion region.
+
+### 9.5 Gate work function made explicit, not an arbitrary default
+
+Prompted mid-task ("gate work function should be clearly defined... so
+[the C-V curve behaves correctly for a p-substrate]"): `V_FB` was
+initially just a bare configurable number defaulting to 0 with no stated
+justification. It's now computed from an explicit
+`gate.workfunction_eV` in `input_mos.yaml` (`null` = the "ideal MOS"
+assumption, metal Fermi level aligned with the substrate's own equilibrium
+Fermi level, i.e. `V_FB=0` by construction) via the standard
+`V_FB = phi_M - phi_S` work-function-difference formula, with
+`phi_S = chi_Si + Eg/2 +/- phi_F` computed from the actual substrate doping
+- so the flat-band and threshold voltages are always traceable to a stated
+physical assumption (or a named real gate material) rather than a silent
+default, and the printed summary (`Cox`, `phi_F`, `V_FB`, `V_T`, `W_max`)
+makes it easy to check where accumulation/depletion/inversion actually
+fall for a given voltage sweep before running it.
+
+### 9.6 Final validated results
+
+- Reproduces the textbook MOS C-V shape exactly, including the low-
+  frequency/high-frequency split in inversion: low-frequency capacitance
+  rises back toward `C_ox` as the inversion layer forms and responds;
+  high-frequency capacitance stays pinned near its value at threshold,
+  since the frozen inversion charge can't. See `out/01_cv_curve.png`.
+- Depletion-region capacitance matches the analytic depletion
+  approximation closely (agreement within a few percent) across the whole
+  depletion range on both sides of flat-band.
+- Verified generic to both substrate types (see 9.1's `n_frozen`/
+  `p_frozen` generalization): threshold voltage for the same 1e16 cm^-3
+  doping comes out at +0.728 V for a p-substrate and the exact mirror
+  -0.728 V for an n-substrate, with accumulation/depletion/inversion
+  correctly swapping which side of `V_FB` they fall on.
+- The band-diagram plot's dedicated oxide-only zoom panel shows a linear
+  `psi(x)` across the 1 nm oxide at every gate voltage checked - the
+  expected signature of zero oxide charge (D-field continuity, no free
+  charge to curve the potential there) - visually confirming the
+  eps-per-edge interface treatment from 9.2 is working correctly, not just
+  passing the aggregate C-V comparison.
+
+### 9.7 A cross-cutting feature added to both tools: quasi-Fermi-potential plots
+
+Requested to apply to both the diode and the new MOS-cap tool, and to be
+configurable rather than hardcoded to a single bias point: `field_save.py`
+is a small shared module (`resolve_save_points`, `save_fields`,
+`plot_quasi_fermi`) that both `main.py` and `mos_main.py` now use, driven
+by an `output.save_bias_points` list in each tool's YAML input (accepting
+specific bias values, `"all"`, or `"last"`). For the diode this plots the
+actual `phin`/`phip` from the bias sweep directly. For the MOS capacitor,
+where the low-frequency curve is equilibrium everywhere (`phin=phip=0` by
+construction, nothing to plot) and the precise high-frequency perturbation
+is too small (millivolts) to see, `mos_main.py` instead generates a
+dedicated, clearly-labeled illustrative plot using a deliberately larger
+(0.2 V) frozen-carrier perturbation, so the quasi-Fermi splitting the
+high-frequency assumption depends on is actually visible.

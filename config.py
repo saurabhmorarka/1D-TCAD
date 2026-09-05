@@ -54,4 +54,6 @@ def build_from_config(cfg: dict):
     if math_model not in ("gummel", "newton"):
         raise ValueError(f"solver.math_model must be 'gummel' or 'newton', got {math_model!r}")
 
-    return mat, dev, Va_list, math_model
+    save_bias_points = cfg.get("output", {}).get("save_bias_points", "last")
+
+    return mat, dev, Va_list, math_model, save_bias_points

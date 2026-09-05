@@ -33,3 +33,14 @@ solver:
   #             sparse solve; quadratic convergence, far fewer outer
   #             iterations; each iteration costs more).
   math_model: gummel
+
+output:
+  # Which Va values (nearest swept match) to save full spatial field
+  # profiles (psi, n, p, and the quasi-Fermi potentials phin/phip) for -
+  # used for the quasi-Fermi-potential plot and fields_by_bias.csv.
+  # Options:
+  #   a list of specific voltages, e.g. [0.0, 0.3, 0.5, 0.7]
+  #   "all"  - save every swept bias point (fine for this device size; a
+  #            very fine/long sweep would make a large CSV)
+  #   "last" - save only the last (most forward) swept point
+  save_bias_points: [0.0, 0.3, 0.5, 0.7, 1.0]

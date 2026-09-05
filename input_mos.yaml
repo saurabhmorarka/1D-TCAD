@@ -1,0 +1,34 @@
+# MOS capacitor C-V simulation input parameters.
+#
+# Every value here overrides the corresponding default in mos_params.py.
+
+substrate:
+  type: p           # "p" or "n" - which carrier is majority in the substrate
+  doping_cm3: 1.0e16 # substrate doping, cm^-3 (Na if type=p, Nd if type=n)
+
+oxide:
+  thickness_nm: 1.0  # gate oxide thickness, nm (1nm is deep into the direct-tunneling
+                      # regime for a real device - this classical model has no gate
+                      # leakage current at all, so treat this as an idealization)
+
+gate:
+  # Gate work function, eV. null = "ideal" MOS assumption (flat-band voltage = 0,
+  # i.e. the gate's Fermi level is defined to align with the substrate's own
+  # equilibrium Fermi level at V_G=0V - this is what puts accumulation at
+  # V_G<0, depletion around V_G~0, and inversion at sufficiently positive V_G
+  # for a p-substrate, matching the intuitive picture of an NMOS gate stack).
+  # Pass a real value (e.g. 4.05 = n+ poly, 5.17 = p+ poly, 4.61 = midgap
+  # metal - see mos_params.GATE_WORKFUNCTION_*) for a realistic, generally
+  # nonzero flat-band voltage instead.
+  workfunction_eV: null
+
+voltage_sweep:
+  start_V: -0.5
+  stop_V: 1.0
+  points: 61
+
+output:
+  # Which V_G values (nearest swept match) to save full spatial field
+  # profiles for - same convention as the diode's input.yaml
+  # (list of voltages, "all", or "last").
+  save_bias_points: [-0.4, 0.0, 0.3, 0.6, 0.9]

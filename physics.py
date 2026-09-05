@@ -85,27 +85,57 @@ def _control_volumes(x: np.ndarray) -> np.ndarray:
 
 
 def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
-                   tol=1e-10, max_iter=100, damping_cap=None):
+                   tol=1e-10, max_iter=100, damping_cap=None,
+                   eps=None, ni=None, n_frozen=None, p_frozen=None):
     """Newton solve of the nonlinear Poisson equation for psi(x), given fixed
     quasi-Fermi levels phin(x), phip(x) (both zero at equilibrium).
 
     Dirichlet BC: psi[0] and psi[-1] are held fixed at psi_guess[0], psi_guess[-1].
+
+    eps: permittivity, either the (scalar) mat.eps default, or an array of
+        length len(x)-1 giving a distinct value per mesh EDGE - needed for a
+        layered structure (e.g. oxide/semiconductor in a MOS capacitor)
+        where permittivity is discontinuous at an interface. Using a
+        per-edge (not per-node) value is what makes the finite-volume flux
+        automatically enforce D-field continuity across that interface.
+    ni: intrinsic concentration, either the (scalar) mat.ni default, or an
+        array of length len(x) giving a distinct value per node - e.g. 0 in
+        an oxide region (no mobile carriers there at all: n=p=0 identically,
+        independent of psi, which is exactly what ni=0 in n=ni*exp(...)
+        gives, including a correctly-zeroed Jacobian contribution).
+    n_frozen, p_frozen: if given (array of length len(x), NaN where not
+        frozen), overrides that carrier's density at those nodes to a fixed
+        value instead of the Boltzmann relation - used for the
+        quasi-small-signal "high-frequency C-V" trick, where the inversion
+        (minority-carrier) charge is held fixed while the majority carrier
+        and potential respond to a small gate-voltage perturbation. Use
+        n_frozen for a p-type substrate (electrons are the minority/
+        inversion carrier - pMOS-cap) or p_frozen for an n-type substrate
+        (holes are the minority carrier - nMOS-cap); at most one is normally
+        given at a time, but both are accepted for generality.
     """
     N = len(x)
     h = np.diff(x)
     psi = psi_guess.copy()
     Vt = mat.Vt
-    eps = mat.eps
+    eps_edge = np.broadcast_to(mat.eps if eps is None else eps, N - 1)
+    ni_arr = np.broadcast_to(mat.ni if ni is None else ni, N)
+    n_frozen_mask = np.zeros(N, dtype=bool) if n_frozen is None else ~np.isnan(n_frozen)
+    p_frozen_mask = np.zeros(N, dtype=bool) if p_frozen is None else ~np.isnan(p_frozen)
 
     hm = h[:-1]   # h_{i-1}, for interior i=1..N-2
     hp = h[1:]    # h_i
     cvol = (hm + hp) / 2.0
-    lap_coeff_m = eps / hm / cvol
-    lap_coeff_p = eps / hp / cvol
+    lap_coeff_m = eps_edge[:-1] / hm / cvol
+    lap_coeff_p = eps_edge[1:] / hp / cvol
 
     for it in range(max_iter):
-        n = mat.ni * np.exp((psi - phin) / Vt)
-        p = mat.ni * np.exp((phip - psi) / Vt)
+        n = ni_arr * np.exp((psi - phin) / Vt)
+        p = ni_arr * np.exp((phip - psi) / Vt)
+        if n_frozen is not None:
+            n = np.where(n_frozen_mask, n_frozen, n)
+        if p_frozen is not None:
+            p = np.where(p_frozen_mask, p_frozen, p)
 
         F = np.zeros(N)
         lower = np.zeros(N)
@@ -116,11 +146,13 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
         diag[0] = 1.0
         diag[-1] = 1.0
 
+        dn_dpsi = np.where(n_frozen_mask, 0.0, n / Vt)    # frozen -> no psi-dependence
+        dp_dpsi = np.where(p_frozen_mask, 0.0, -p / Vt)   # frozen -> no psi-dependence
         F[1:-1] = (lap_coeff_p * (psi[2:] - psi[1:-1]) - lap_coeff_m * (psi[1:-1] - psi[:-2])) \
             - Q * (n[1:-1] - p[1:-1] - Cdop[1:-1])
         lower[1:-1] = lap_coeff_m
         upper[1:-1] = lap_coeff_p
-        diag[1:-1] = -(lap_coeff_m + lap_coeff_p) - Q * (n[1:-1] + p[1:-1]) / Vt
+        diag[1:-1] = -(lap_coeff_m + lap_coeff_p) - Q * (dn_dpsi[1:-1] - dp_dpsi[1:-1])
 
         J = sp.diags([lower[1:], diag, upper[:-1]], offsets=[-1, 0, 1], format="csc")
         delta = spla.spsolve(J, F)
@@ -135,8 +167,12 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
         if np.max(np.abs(delta)) < tol:
             break
 
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
+    n = ni_arr * np.exp((psi - phin) / Vt)
+    p = ni_arr * np.exp((phip - psi) / Vt)
+    if n_frozen is not None:
+        n = np.where(n_frozen_mask, n_frozen, n)
+    if p_frozen is not None:
+        p = np.where(p_frozen_mask, p_frozen, p)
     return psi, n, p, it + 1
 
 

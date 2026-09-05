@@ -24,6 +24,7 @@ from mesh import build_grid
 from solver import solve_equilibrium, voltage_sweep
 import analytic as an
 import config as cfg
+import field_save as fsave
 
 OUT = os.path.join(os.path.dirname(__file__), "out")
 os.makedirs(OUT, exist_ok=True)
@@ -36,7 +37,7 @@ C_GRID = "#c9c9c9"
 
 def main():
     input_cfg = cfg.load_config()
-    mat, dev, Va_list, math_model = cfg.build_from_config(input_cfg)
+    mat, dev, Va_list, math_model, save_bias_points = cfg.build_from_config(input_cfg)
     print(f"Loaded input.yaml (solver.math_model={math_model!r})" if input_cfg
           else "No input.yaml found - using params.py defaults")
 
@@ -171,6 +172,27 @@ def main():
     fig.savefig(os.path.join(OUT, "04_ideality_factor.png"), dpi=150)
     plt.close(fig)
 
+    # 5. Quasi-Fermi potentials (non-equilibrium) at a configurable set of bias points
+    # (input.yaml: output.save_bias_points - a list of Va values, "all", or "last")
+    save_idx = fsave.resolve_save_points(save_bias_points, Va_arr)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(x_um, psi_eq, color=C_GRID, lw=1.2, ls=":", label="psi, equilibrium (V_a=0 reference)")
+    fsave.plot_quasi_fermi(ax, results, save_idx, "Va", x_um)
+    ax.axvline(0, color=C_GRID, lw=1, zorder=0)
+    ax.set_xlabel("x (um)")
+    ax.set_ylabel("Quasi-Fermi potential (V)")
+    ax.set_title("Electron/hole quasi-Fermi potentials at saved bias points")
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(alpha=0.3, color=C_GRID)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "05_quasi_fermi_potentials.png"), dpi=150)
+    plt.close(fig)
+
+    fields_csv = os.path.join(OUT, "fields_by_bias.csv")
+    fsave.save_fields(results, save_idx, "Va", fields_csv, x)
+    print(f"\nSaved full field profiles for Va = {[round(results[i]['Va'], 4) for i in save_idx]} "
+          f"to {fields_csv}")
+
     # ================= Solver runtime benchmark: Gummel vs Newton =================
     # Runs BOTH solvers across the same voltage sweep (independent of which one
     # produced the results/plots above) so their wall-clock cost is directly
@@ -216,7 +238,7 @@ def main():
     ax.legend()
     ax.grid(alpha=0.3, color=C_GRID)
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "05_solver_benchmark.png"), dpi=150)
+    fig.savefig(os.path.join(OUT, "06_solver_benchmark.png"), dpi=150)
     plt.close(fig)
 
     bench_csv = os.path.join(OUT, "solver_benchmark.csv")
@@ -242,7 +264,9 @@ def main():
     print("  02_carrier_profiles.png")
     print("  03_iv_curve.png")
     print("  04_ideality_factor.png")
-    print("  05_solver_benchmark.png")
+    print("  05_quasi_fermi_potentials.png")
+    print("  06_solver_benchmark.png")
+    print("  fields_by_bias.csv")
     print("  iv_sweep.csv")
     print("  solver_benchmark.csv")
 

@@ -1,9 +1,11 @@
-# 1D Diode
+# 1D TCAD: Diode and MOS Capacitor
 
-A 1D TCAD-style drift-diffusion simulator for a p-n junction diode, built from
-scratch in Python/NumPy/SciPy.
+1D TCAD-style semiconductor device simulators, built from scratch in
+Python/NumPy/SciPy: a p-n junction diode (drift-diffusion, I-V) and a MOS
+capacitor (equilibrium Poisson, C-V). They share the same core Poisson/
+Scharfetter-Gummel machinery (`physics.py`).
 
-## What it does
+## Diode (`main.py`, `input.yaml`)
 
 - Builds a nonuniform 1D mesh across a step p-n junction (sub-nm spacing at
   the junction, geometrically coarsening into the bulk).
@@ -17,41 +19,25 @@ scratch in Python/NumPy/SciPy.
   - **Coupled Newton**: all three equations (Poisson + both continuity
     equations) solved together with an analytic sparse Jacobian and a direct
     sparse solve per step, quadratic convergence (few outer iterations,
-    ~4x faster wall-clock - see `out/05_solver_benchmark.png`).
+    ~4-10x faster wall-clock depending on bias range - see
+    `out/06_solver_benchmark.png`).
 - Compares against closed-form theory: built-in potential
   `Vbi = Vt*ln(Na*Nd/ni^2)`, the depletion approximation, and the Shockley
   long-base ideal diode law `I = I0*(exp(V/Vt)-1)`.
+- Plots the electron/hole quasi-Fermi potentials (phin, phip) at a
+  configurable set of bias points (`input.yaml`: `output.save_bias_points`),
+  alongside a full-field CSV export for those points.
 
 All simulation parameters (doping, device thickness, voltage sweep range,
-which solver to use) are read from `input.yaml`, not hardcoded - edit that
-file to change them. `params.py` just holds the defaults it overrides.
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `input.yaml` | **Edit this** to change doping, thickness, voltage sweep, or solver (`math_model: gummel` \| `newton`) |
-| `config.py` | Loads `input.yaml` and builds the `Material`/`Device`/voltage-sweep/solver-choice overrides from it |
-| `params.py` | Physical constants and material/device parameter defaults |
-| `mesh.py` | Nonuniform grid generator |
-| `physics.py` | Bernoulli function (+ its derivative), nonlinear Poisson (Newton), Scharfetter-Gummel continuity solves |
-| `analytic.py` | Closed-form comparisons (Vbi, depletion width, Shockley law) |
-| `solver.py` | Equilibrium solve + bias sweep (dispatches to either solver below) |
-| `newton_solver.py` | Fully coupled Newton solve: analytic sparse Jacobian, direct sparse solve, backtracking line search |
-| `main.py` | Driver: runs the sweep with both solvers (for the benchmark) plus the one from `input.yaml`, generates plots and CSVs in `out/` |
-
-## Running
+which solver to use, which bias points to save full fields for) are read
+from `input.yaml`, not hardcoded - edit that file to change them. `params.py`
+just holds the defaults it overrides.
 
 ```bash
 python3 main.py
 ```
 
-Requires `numpy`, `scipy`, `matplotlib`, `pyyaml`. Output plots and CSVs are
-written to `out/`.
-
-## Results
-
-The simulation reproduces standard diode physics:
+### Diode results
 
 - The numerically self-consistent built-in potential matches
   `Vt*ln(Na*Nd/ni^2)` to 8 significant figures.
@@ -65,6 +51,81 @@ The simulation reproduces standard diode physics:
 - Reverse leakage current is orders of magnitude above the ideal Shockley
   I0, correctly reflecting depletion-region generation current that the
   simple long-base ideal-diode formula does not model.
-- The coupled Newton solver matches Gummel's current to ~4 significant
-  figures at every bias point while using roughly 5x fewer outer iterations
-  (quadratic vs. linear convergence) and running about 4x faster overall.
+- The coupled Newton solver matches Gummel's current to 4+ significant
+  figures at every bias point while using far fewer outer iterations
+  (quadratic vs. linear convergence); the speedup grows with how hard the
+  bias point is to converge (~4x over a mild 0.65V forward sweep, ~10x once
+  the sweep is pushed to 1.2V/high injection, where Gummel starts hitting
+  its iteration cap without fully converging - see `DEVELOPMENT_LOG.md`).
+
+## MOS capacitor (`mos_main.py`, `input_mos.yaml`)
+
+- Builds a mesh across a metal gate - thin oxide - uniform substrate stack
+  (either p- or n-type; generic to pMOS-cap or nMOS-cap).
+- A MOS capacitor has **no current path** in steady state (the gate is an
+  ideal insulator), so at every DC gate voltage the structure sits at a
+  single, uniform Fermi level - the **low-frequency (quasi-static) C-V
+  curve** needs only a sequence of equilibrium nonlinear-Poisson solves
+  (reusing the diode's `solve_poisson`, generalized to a position-dependent
+  permittivity and intrinsic concentration for the oxide/semiconductor
+  stack), no continuity equations or AC analysis at all:
+  `C(V_G) = -dQ_gate/dV_G` from numerically differentiating the swept
+  charge.
+- The **high-frequency C-V curve** (inversion/minority charge can't follow
+  a fast probe signal) is a **quasi-small-signal** calculation, not a
+  literal frequency-domain solve: freeze the minority carrier
+  (`solve_poisson`'s `n_frozen` for a p-substrate, `p_frozen` for an
+  n-substrate) at its low-frequency value, perturb V_G by a small amount,
+  and let only the majority carrier and potential respond.
+- Compares against closed-form depletion-approximation theory: flat-band
+  voltage (computed from an explicit, physically real gate work function -
+  `input_mos.yaml`: `gate.workfunction_eV`, or `null` for the ideal
+  phi_ms=0 assumption), threshold voltage, and analytic low-/high-frequency
+  C-V curves.
+
+```bash
+python3 mos_main.py
+```
+
+### MOS-cap results
+
+- The numeric C-V curve reproduces the textbook shape exactly: accumulation
+  (C→C_ox), depletion (matches the analytic depletion approximation
+  closely), and the classic **low-frequency/high-frequency split** in
+  inversion (low-freq rises back toward C_ox as the inversion layer forms
+  and can respond; high-freq stays pinned near C_min since it can't) - see
+  `out/01_cv_curve.png`.
+- In accumulation, the numeric result converges (confirmed via a mesh
+  refinement study) to ~0.84 x C_ox rather than the idealized analytic
+  C_ox - a real, finite accumulation-layer screening-length effect the
+  simple depletion approximation doesn't capture, requiring a much finer
+  near-interface mesh than the depletion region needs to resolve properly.
+- Verified generic to both substrate types: for the same 1e16 cm^-3
+  doping, threshold voltage comes out at +0.728V for a p-substrate and the
+  mirror-image -0.728V for an n-substrate, with the accumulation/depletion/
+  inversion regions correctly swapping which side of V_FB they fall on.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `input.yaml` | **Edit this** for the diode: doping, thickness, voltage sweep, solver (`math_model: gummel` \| `newton`), which bias points to save fields for |
+| `config.py` | Loads `input.yaml` into `Material`/`Device`/voltage-sweep/solver-choice overrides |
+| `input_mos.yaml` | **Edit this** for the MOS capacitor: substrate type/doping, oxide thickness, gate work function, voltage sweep |
+| `mos_config.py` | Loads `input_mos.yaml` into `Material`/`MOSDevice`/voltage-sweep overrides |
+| `params.py` | Physical constants and diode material/device parameter defaults |
+| `mos_params.py` | MOS capacitor device parameters (oxide thickness, gate work function, SiO2 permittivity) |
+| `mesh.py` | Diode nonuniform grid generator |
+| `mos_mesh.py` | MOS capacitor oxide+substrate grid generator |
+| `physics.py` | Bernoulli function (+ its derivative), nonlinear Poisson (Newton, generalized to array eps/ni and frozen-carrier modes), Scharfetter-Gummel continuity solves |
+| `analytic.py` | Diode closed-form comparisons (Vbi, depletion width, Shockley law) |
+| `mos_analytic.py` | MOS-cap closed-form comparisons (flat-band/threshold voltage, analytic low-/high-freq C-V) |
+| `solver.py` | Diode equilibrium solve + bias sweep (dispatches to either solver below) |
+| `newton_solver.py` | Diode's fully coupled Newton solve: analytic sparse Jacobian, direct sparse solve, backtracking line search |
+| `mos_solver.py` | MOS-cap equilibrium C-V sweep (low-frequency) and frozen-carrier quasi-small-signal sweep (high-frequency) |
+| `field_save.py` | Shared helper: selecting which bias points to save full field profiles for, quasi-Fermi-potential plotting, field CSV export |
+| `main.py` | Diode driver: runs the sweep with both solvers (for the benchmark) plus the one from `input.yaml`, generates plots and CSVs in `out/` |
+| `mos_main.py` | MOS-cap driver: runs the C-V sweep, generates plots and CSVs in `out/` |
+
+Requires `numpy`, `scipy`, `matplotlib`, `pyyaml`. Output plots and CSVs are
+written to `out/` (shared between both tools; filenames don't collide).
