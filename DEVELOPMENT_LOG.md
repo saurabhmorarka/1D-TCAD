@@ -762,3 +762,99 @@ README (diode I-V, MOS-cap C-V) and turned the two existing filename
 mentions into actual embedded `![...](...)` images inline in their
 respective results sections, so the two headline results are visible
 without cloning the repo.
+
+## 12. Session 6: a structure+fields file format and a growing plot library, aimed at teaching
+
+The ask: real textbook-style plots (an Ec/Ev/Ei/Ef band diagram, not just
+electrostatic potential; a fixed/mobile/net charge-density breakdown; a
+literal "here's the device" structure diagram with the mesh visible on
+it), organized so the plotting code has somewhere to grow into as more
+plot types get added, and so the underlying data can be saved once and
+handed to a plotter standalone - without requiring a re-run - by anyone
+who has the file. Explicitly scoped to not build 2D/3D yet, but to leave
+the hooks for it cheap to add later, since this project is expected to
+grow into a 2D/3D TCAD tool eventually.
+
+### 12.1 The design, reviewed before writing code
+
+Per this project's established practice (see Session 1's plain-language
+scoping step), the design was laid out and confirmed before implementation:
+
+- `structure_io.py`: schema + `save_structure()`/`load_structure()` for one
+  JSON file per driver run (`out/diode_structure.json`, `out/
+  mos_structure.json`) - device geometry (`regions`), the mesh (`grid.
+  x_um`), doping, and per-bias-point fields (psi/n/p/phin/phip). Additive
+  to the existing PNG/CSV outputs, not a replacement for either.
+- `plot.py`: the plot library, growing over time. Every function takes an
+  already-loaded structure dict, not raw arrays, so it doesn't care
+  whether it was called in-memory from `main.py`/`mos_main.py` or via the
+  file from the standalone CLI (`python3 plot.py out/diode_structure.json`).
+- 2D/3D readiness: the schema carries a `dim` field, and `plot.py`'s
+  functions dispatch on it, raising `NotImplementedError` for anything but
+  `dim=1` today. The one deliberate design choice for extensibility: a
+  region's geometry lives under a dimension-specific key
+  (`x_range_um` for 1D), so a 2D region can later add polygon keys instead
+  of extending this one - nothing else in the schema needs to change to
+  add a dimension.
+
+### 12.2 Three new plots, and a physics bug the MOS-cap case caught
+
+`plot_structure()` draws the device as a colored horizontal strip (by
+region: p-Si/n-Si/oxide) with mesh NODE POSITIONS drawn as tick marks
+underneath - this is what actually shows adaptive mesh refinement
+happening, which none of the existing psi(x)/carrier plots make visible.
+
+`plot_charge()` decomposes rho(x)/q into fixed (ionized dopant) charge
+(just `Cdop`, since this project doesn't model partial/compensated
+ionization - a given mesh node is unambiguously n-type or p-type doped),
+mobile carrier charge (`p-n`), and their sum. For the MOS-cap, each saved
+gate voltage is also labeled with its accumulation/depletion/inversion
+regime, classified in `mos_main.py` from `VG` vs. `V_FB`/`V_T` (kept out of
+the generic `plot.py`/schema, which has no MOS-specific concept of a
+threshold voltage) and passed through as an optional `regime` string on
+each bias point.
+
+`plot_bands()` is where a real bug showed up. The first implementation
+defined an intrinsic level `Ei(x) = -psi(x)` (continuous, shared across
+materials) and derived `Ec = Ei + Eg/2`, `Ev = Ei - Eg/2`, `E_vacuum = Ec +
+chi` from it - correct for a single uniform material (the diode), where it
+was tested first and looked right (matched the textbook equilibrium
+band-bending picture exactly, Ef flat, Vbi split correctly at the
+junction). Applied to the MOS-cap's oxide/substrate interface (different
+chi AND Eg on each side), it produced a ~4 eV *jump in the vacuum level*
+at the interface - unphysical; a real material interface (no surface
+dipole modeled here) has a continuous vacuum level, with the
+conduction/valence-band OFFSET coming from each side's own electron
+affinity (Anderson's rule), not from splitting a shared intrinsic level by
++-Eg/2. This was caught by literally looking at the rendered plot
+(matplotlib's dotted E_vacuum line had a visible kink at x=0), not from
+the diode case, which is why "run it and look at the picture" mattered
+here beyond just not-crashing. Fixed by making `E_vacuum(x) = -psi(x)` the
+primary, continuous quantity, and deriving `Ec = E_vacuum - chi`, `Ev = Ec
+- Eg` (both taking chi/Eg as either a single float or a per-node array -
+`mos_main.py` builds a per-node chi/Eg array from `g["is_oxide"]`) - for
+the diode's single uniform material this is equivalent up to a constant
+additive shift (physically irrelevant, energy references are arbitrary),
+so its band diagram's shape didn't change, just its absolute vertical
+position (now anchored to a physically meaningful electron-affinity-based
+reference instead of an arbitrary zero). After the fix, the MOS-cap band
+diagram shows a continuous vacuum level and a conduction-band offset of
+exactly `chi_Si - chi_ox = 4.05 - 0.9 = 3.15 eV`, matching the approximate
+SiO2 constants added to `mos_params.py` (`CHI_OX_EV`, `EG_OX_EV` -
+literature-approximate, used only for this qualitative band picture, never
+by the actual Poisson/continuity physics, which only ever sees the oxide
+through `eps_ox` and zero carrier density).
+
+### 12.3 A second scale problem, same fix applied twice
+
+The MOS-cap's oxide (1 nm) is invisible next to its substrate (>1 um) on
+any single linear x-axis - not just for the structure diagram (mesh dots
+bunched invisibly at one edge) but for the band/charge diagrams too (the
+oxide's entire width rounds to the same pixel as x=0). Rather than pick
+one compromise scale, `plot_structure()`/`plot_bands()`/`plot_charge()`
+all gained an optional `xlim_um` zoom argument, and `mos_main.py` calls
+each of them twice into a two-panel figure: one panel zoomed on the oxide,
+one on the substrate depletion region (mirroring the pattern the original
+MOS-cap psi(x) plot from Session 3 already used for the same reason). The
+diode's single band/charge diagram doesn't need this split since its
+p-side/n-side/junction are all comparable (um) scales.

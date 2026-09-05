@@ -25,6 +25,8 @@ from solver import solve_equilibrium, voltage_sweep
 import analytic as an
 import config as cfg
 import field_save as fsave
+import structure_io as sio
+import plot as tplot
 
 OUT = os.path.join(os.path.dirname(__file__), "out")
 os.makedirs(OUT, exist_ok=True)
@@ -193,6 +195,49 @@ def main():
     print(f"\nSaved full field profiles for Va = {[round(results[i]['Va'], 4) for i in save_idx]} "
           f"to {fields_csv}")
 
+    # ================= Structure + textbook band/charge diagrams =================
+    struct_bias_points = [{
+        "label": "equilibrium (built-in)", "bias": 0.0,
+        "fields": {"psi": psi_eq, "n": n_eq, "p": p_eq,
+                   "phin": np.zeros_like(x), "phip": np.zeros_like(x)},
+    }]
+    for i in save_idx:
+        r = results[i]
+        struct_bias_points.append({
+            "label": f"Va={r['Va']:.2f} V", "bias": r["Va"],
+            "fields": {"psi": r["psi"], "n": r["n"], "p": r["p"], "phin": r["phin"], "phip": r["phip"]},
+        })
+
+    struct_doc = sio.save_structure(
+        os.path.join(OUT, "diode_structure.json"),
+        device="diode",
+        material={"eps_r": mat.eps_r, "ni_cm3": mat.ni, "T": mat.T,
+                  "chi_eV": mat.chi_eV, "Eg_eV": mat.Eg_eV},
+        regions=[
+            {"name": f"p-side (Na~{dev.Na:.1e})", "x_range_um": [-g["Wp"] * 1e4, 0.0],
+             "kind": "semiconductor", "doping_type": "p"},
+            {"name": f"n-side (Nd~{dev.Nd:.1e})", "x_range_um": [0.0, g["Wn"] * 1e4],
+             "kind": "semiconductor", "doping_type": "n"},
+        ],
+        x_um=x_um, doping_cm3=Cdop, bias_points=struct_bias_points,
+    )
+
+    band_charge_xlim = (-zoom_half_width_um, zoom_half_width_um)
+    fig = tplot.plot_structure(struct_doc).figure
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "07_structure.png"), dpi=150)
+    plt.close(fig)
+
+    fig = tplot.plot_bands(struct_doc, bias_index=0, xlim_um=band_charge_xlim).figure
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "08_band_diagram.png"), dpi=150)
+    plt.close(fig)
+
+    fig = tplot.plot_charge(struct_doc, bias_index=0, xlim_um=band_charge_xlim).figure
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "09_charge_density.png"), dpi=150)
+    plt.close(fig)
+
     # ================= Solver runtime benchmark: Gummel vs Newton =================
     # Runs BOTH solvers across the same voltage sweep (independent of which one
     # produced the results/plots above) so their wall-clock cost is directly
@@ -266,9 +311,13 @@ def main():
     print("  04_ideality_factor.png")
     print("  05_quasi_fermi_potentials.png")
     print("  06_solver_benchmark.png")
+    print("  07_structure.png")
+    print("  08_band_diagram.png")
+    print("  09_charge_density.png")
     print("  fields_by_bias.csv")
     print("  iv_sweep.csv")
     print("  solver_benchmark.csv")
+    print("  diode_structure.json  (standalone: python3 plot.py out/diode_structure.json)")
 
 
 if __name__ == "__main__":

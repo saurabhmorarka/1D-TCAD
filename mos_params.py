@@ -14,6 +14,12 @@ from doping_profiles import DopingProfile
 EPS_OX_R = 3.9  # SiO2 relative permittivity
 CHI_SI_EV = 4.05  # silicon electron affinity, eV
 EG_SI_EV = 1.12   # silicon bandgap, eV (300K)
+# Approximate literature SiO2 values, used only for the qualitative
+# oxide-side band picture in plot.py's band diagram - not used anywhere in
+# this project's actual physics (Poisson/continuity solves treat the oxide
+# purely via eps_ox and zero carrier density, never via chi/Eg).
+CHI_OX_EV = 0.9
+EG_OX_EV = 9.0
 
 # A few common real gate work functions, eV - pass one as gate_workfunction_eV
 # to compute a realistic (non-zero) flat-band voltage instead of the ideal

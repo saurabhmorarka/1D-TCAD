@@ -28,6 +28,8 @@ class Material:
     mu_p: float = 480.0             # hole mobility, cm^2/V/s (constant)
     tau_n: float = 1.0e-9           # SRH electron lifetime, s
     tau_p: float = 1.0e-9           # SRH hole lifetime, s
+    chi_eV: float = 4.05            # Si electron affinity, eV (band diagrams only)
+    Eg_eV: float = 1.12             # Si bandgap, eV (300K; band diagrams only)
 
     @property
     def Vt(self) -> float:

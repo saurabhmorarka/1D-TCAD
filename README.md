@@ -62,6 +62,16 @@ python3 main.py
 - Reverse leakage current is orders of magnitude above the ideal Shockley
   I0, correctly reflecting depletion-region generation current that the
   simple long-base ideal-diode formula does not model.
+- Beyond the numeric-vs-analytic comparisons above, every run also writes a
+  `*_structure.json` (device geometry, mesh, doping, per-bias fields - see
+  `structure_io.py`) that `plot.py` turns into textbook-style diagrams: the
+  device cross-section with mesh node density visible, a real Ec/Ev/Ei/Ef
+  band diagram (not just electrostatic potential), and a fixed/mobile/net
+  charge-density decomposition - either automatically as part of `main.py`/
+  `mos_main.py`, or standalone later against just the JSON file:
+  `python3 plot.py out/diode_structure.json`.
+
+  ![Diode band diagram](out/08_band_diagram.png)
 - The coupled Newton solver matches Gummel's current to 4+ significant
   figures at every bias point while using far fewer outer iterations
   (quadratic vs. linear convergence); the speedup grows with how hard the
@@ -128,6 +138,14 @@ python3 mos_main.py
   doping, threshold voltage comes out at +0.728V for a p-substrate and the
   mirror-image -0.728V for an n-substrate, with the accumulation/depletion/
   inversion regions correctly swapping which side of V_FB they fall on.
+- Also gets the `plot.py` structure/band/charge diagrams described above
+  (see the diode section) - the MOS-cap band diagram shows the ~3.15 eV
+  Si/SiO2 conduction-band offset (from each material's own electron
+  affinity, via `mos_params.py`'s approximate SiO2 constants) come out
+  correctly, and the charge-density plot is labeled with the
+  accumulation/depletion/inversion regime at each saved gate voltage.
+
+  ![MOS-cap band diagram](out/06_band_diagram.png)
 
 ## Files
 
@@ -148,6 +166,8 @@ python3 mos_main.py
 | `newton_solver.py` | Diode's fully coupled Newton solve: analytic sparse Jacobian, direct sparse solve, backtracking line search |
 | `mos_solver.py` | MOS-cap equilibrium C-V sweep (low-frequency) and frozen-carrier quasi-small-signal sweep (high-frequency) |
 | `field_save.py` | Shared helper: selecting which bias points to save full field profiles for, quasi-Fermi-potential plotting, field CSV export |
+| `structure_io.py` | Schema + save/load for the `*_structure.json` files each driver writes: device geometry, mesh, doping, and per-bias fields, in one human-readable file `plot.py` (or a future 2D/3D version of this project) can read back |
+| `plot.py` | Structure/band-diagram/charge-density plot library, driven from a loaded structure file. Also runnable standalone against just a `*_structure.json`: `python3 plot.py out/diode_structure.json` |
 | `main.py` | Diode driver: runs the sweep with both solvers (for the benchmark) plus the one from `input_diode.yaml`, generates plots and CSVs in `out/` |
 | `mos_main.py` | MOS-cap driver: runs the C-V sweep, generates plots and CSVs in `out/` |
 

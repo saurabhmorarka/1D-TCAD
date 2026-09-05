@@ -1,0 +1,241 @@
+"""Plot library for structure+fields files (see structure_io.py for the
+schema): device cross-section, textbook band diagrams, and charge-density
+decomposition. New plot types belong here as this project grows.
+
+Every function takes an already-loaded structure dict (from
+structure_io.load_structure(), or built in-memory by a driver without
+touching disk) so it doesn't care whether it was called from main.py,
+mos_main.py, or the standalone CLI below. Each dispatches on doc["dim"] and
+only implements dim=1 today; a future 2D/3D structure would add a dim==2/3
+branch to each of these without touching the dim==1 code path.
+
+Standalone usage (given only a *_structure.json file, e.g. shared by
+someone else): `python3 plot.py out/diode_structure.json`
+"""
+import argparse
+import os
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+import structure_io as sio
+
+C_GRID = "#c9c9c9"
+REGION_COLORS = {
+    ("semiconductor", "p"): "#f4a259",
+    ("semiconductor", "n"): "#5fa8d3",
+    ("insulator", None): "#d9d9d9",
+}
+
+
+def _region_color(region):
+    key = (region.get("kind"), region.get("doping_type"))
+    if key in REGION_COLORS:
+        return REGION_COLORS[key]
+    return REGION_COLORS.get((region.get("kind"), None), "#bbbbbb")
+
+
+def _require_1d(doc, fn_name):
+    if doc["dim"] != 1:
+        raise NotImplementedError(f"{fn_name}: only dim=1 structures are supported so far "
+                                   f"(got dim={doc['dim']})")
+
+
+def plot_structure(doc, ax=None, xlim_um=None, label_regions=True):
+    """Device cross-section: regions colored by material/doping type, with
+    mesh node positions drawn as tick marks so the (adaptive) mesh
+    refinement is visible directly - dense near junctions/interfaces,
+    coarsening into the bulk. Pass `xlim_um` to zoom into a sub-range (e.g.
+    a nm-scale oxide layer that would otherwise be invisible next to a
+    um-scale substrate) - region labels are hidden in a zoom by default
+    since they'd usually fall outside it."""
+    _require_1d(doc, "plot_structure")
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=(9, 2.8))
+    x_um = np.array(doc["grid"]["x_um"])
+    if xlim_um is not None:
+        mask = (x_um >= xlim_um[0]) & (x_um <= xlim_um[1])
+        x_um = x_um[mask]
+
+    for region in doc["regions"]:
+        x0, x1 = region["x_range_um"]
+        ax.axvspan(x0, x1, color=_region_color(region), alpha=0.85, lw=0, zorder=0)
+        if label_regions and xlim_um is None:
+            ax.text((x0 + x1) / 2.0, 1.4, region["name"], ha="center", va="bottom", fontsize=9)
+        ax.axvline(x0, color="#555555", lw=1, zorder=1)
+    ax.axvline(doc["regions"][-1]["x_range_um"][1], color="#555555", lw=1, zorder=1)
+
+    ax.plot(x_um, np.zeros_like(x_um), "|", color="#222222", ms=16, mew=1.0, zorder=2)
+    ax.set_ylim(-1, 2.2)
+    ax.set_yticks([])
+    xlim = xlim_um if xlim_um is not None else (doc["regions"][0]["x_range_um"][0],
+                                                  doc["regions"][-1]["x_range_um"][1])
+    ax.set_xlim(*xlim)
+    ax.set_xlabel("x (um)")
+    ax.set_title(f"{doc['device']} structure  ({len(x_um)} mesh nodes"
+                 f"{' in view' if xlim_um is not None else ''})")
+    if own_fig:
+        fig.tight_layout()
+    return ax
+
+
+def _broadcast_material(value, n):
+    arr = np.asarray(value, dtype=float)
+    return arr if arr.ndim > 0 else np.full(n, float(arr))
+
+
+def _band_energies(doc, bias_point):
+    """Ec, Ev, Ei (midgap approximation), vacuum level, and electron/hole
+    quasi-Fermi energies, all in eV, from psi/phin/phip (all in volts).
+
+    The vacuum level is taken as the PRIMARY, continuous quantity -
+    E_vacuum(x) = -psi(x) (arbitrary zero at psi=0) - and Ec/Ev are derived
+    from it via each material's own electron affinity/bandgap (Anderson's
+    rule: Ec = E_vacuum - chi, Ev = Ec - Eg). This matters wherever chi/Eg
+    vary with position (e.g. the MOS-cap's oxide vs. substrate): deriving
+    Ec/Ev from a shared, continuous vacuum level is what produces the
+    correct conduction/valence-band offset at a material interface: doing
+    it the other way around (splitting a shared, continuous Ei by +-Eg/2)
+    would instead force E_vacuum itself to jump at the interface, which is
+    unphysical. For a single uniform material (the diode) the two are
+    equivalent up to a constant shift.
+
+    Efn/Efp follow from the same psi-phin/psi-phip relations physics.py
+    uses (n = ni*exp((psi-phin)/Vt), p = ni*exp((phip-psi)/Vt)): a single
+    flat Ef when phin=phip=0, i.e. true equilibrium."""
+    psi = np.array(bias_point["fields"]["psi"])
+    n = len(psi)
+    chi = _broadcast_material(doc["material"]["chi_eV"], n)
+    Eg = _broadcast_material(doc["material"]["Eg_eV"], n)
+    phin = np.nan_to_num(np.array(bias_point["fields"].get("phin", np.zeros(n)), dtype=float))
+    phip = np.nan_to_num(np.array(bias_point["fields"].get("phip", np.zeros(n)), dtype=float))
+
+    Evac = -psi
+    Ec = Evac - chi
+    Ev = Ec - Eg
+    Ei = (Ec + Ev) / 2.0
+    Efn = Ei + (psi - phin)
+    Efp = Ei - (phip - psi)
+    return Ec, Ev, Ei, Evac, Efn, Efp
+
+
+def plot_bands(doc, bias_index=0, ax=None, xlim_um=None):
+    """Textbook band diagram: E_c, E_v, E_i, vacuum level, and the electron/
+    hole quasi-Fermi levels (drawn as a single flat E_f when the structure
+    is in true equilibrium, i.e. phin=phip=0 everywhere). E_i is the
+    midgap approximation (Ec+Ev)/2, not the exact Nc/Nv-weighted intrinsic
+    level - fine for a teaching plot, not for precision analytic
+    comparison (see analytic.py/mos_analytic.py for that)."""
+    _require_1d(doc, "plot_bands")
+    bp = doc["bias_points"][bias_index]
+    Ec, Ev, Ei, Evac, Efn, Efp = _band_energies(doc, bp)
+    x_um = np.array(doc["grid"]["x_um"])
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=(8, 5.5))
+
+    ax.plot(x_um, Evac, color="#999999", lw=1.2, ls=":", label="E_vacuum")
+    ax.plot(x_um, Ec, color="#1f6feb", lw=2, label="E_c")
+    ax.plot(x_um, Ev, color="#c2410c", lw=2, label="E_v")
+    ax.plot(x_um, Ei, color="#888888", lw=1.2, ls="--", label="E_i (midgap approx.)")
+    if np.allclose(Efn, Efp):
+        ax.plot(x_um, Efn, color="#1a7f37", lw=1.8, label="E_f")
+    else:
+        ax.plot(x_um, Efn, color="#1a7f37", lw=1.8, label="E_fn (electron quasi-Fermi)")
+        ax.plot(x_um, Efp, color="#9a6700", lw=1.8, ls="--", label="E_fp (hole quasi-Fermi)")
+
+    if xlim_um is not None:
+        ax.set_xlim(*xlim_um)
+    ax.set_xlabel("x (um)")
+    ax.set_ylabel("Energy (eV)")
+    label = bp.get("label") or f"bias={bp['bias']:.3f}"
+    ax.set_title(f"{doc['device']} band diagram, {label}")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3, color=C_GRID)
+    if own_fig:
+        fig.tight_layout()
+    return ax
+
+
+def plot_charge(doc, bias_index=0, ax=None, xlim_um=None):
+    """Charge-density decomposition: fixed (ionized dopant) charge vs.
+    mobile carrier charge vs. their sum (net charge), all in units of
+    elementary charges/cm^3 (not multiplied by q) so they're directly
+    comparable to the doping numbers used elsewhere in this project."""
+    _require_1d(doc, "plot_charge")
+    bp = doc["bias_points"][bias_index]
+    x_um = np.array(doc["grid"]["x_um"])
+    Cdop = np.array(doc["doping_cm3"])
+    n = np.array(bp["fields"]["n"])
+    p = np.array(bp["fields"]["p"])
+    mobile = p - n
+    net = Cdop + mobile
+
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+    regime = bp.get("regime")
+    if regime:
+        ax.text(0.02, 0.96, f"regime: {regime}", transform=ax.transAxes, fontsize=9,
+                va="top", ha="left", color="#555555",
+                bbox=dict(boxstyle="round", fc="#f0f0f0", ec="none"))
+
+    ax.axhline(0, color="#333333", lw=0.8)
+    ax.plot(x_um, Cdop, color="#6a4c93", lw=1.8, ls="--", label="Fixed (ionized dopant) charge, N_D-N_A")
+    ax.plot(x_um, mobile, color="#1f6feb", lw=1.8, label="Mobile carrier charge, p-n")
+    ax.plot(x_um, net, color="#c2410c", lw=2.2, label="Net charge, (N_D-N_A)+(p-n)")
+
+    if xlim_um is not None:
+        ax.set_xlim(*xlim_um)
+    ax.set_xlabel("x (um)")
+    ax.set_ylabel("Charge density / q (cm^-3)")
+    label = bp.get("label") or f"bias={bp['bias']:.3f}"
+    ax.set_title(f"{doc['device']} charge density, {label}")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3, color=C_GRID)
+    if own_fig:
+        fig.tight_layout()
+    return ax
+
+
+PLOTTERS = {"structure": plot_structure, "bands": plot_bands, "charge": plot_charge}
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Standalone plotter for tcad1d structure+fields JSON files "
+                     "(see structure_io.py for the file format).")
+    parser.add_argument("structure_path", help="Path to a *_structure.json file")
+    parser.add_argument("--which", default="structure,bands,charge",
+                         help="Comma-separated plot names to make: structure,bands,charge "
+                              "(default: all three)")
+    parser.add_argument("--bias-index", type=int, default=0,
+                         help="Index into bias_points for the bands/charge plots (default: 0, "
+                              "the first saved bias point)")
+    parser.add_argument("--out-dir", default=None,
+                         help="Directory to write PNGs into (default: alongside the structure file)")
+    args = parser.parse_args()
+
+    doc = sio.load_structure(args.structure_path)
+    out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.structure_path)) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(args.structure_path))[0]
+
+    for name in (n.strip() for n in args.which.split(",") if n.strip()):
+        if name not in PLOTTERS:
+            raise SystemExit(f"Unknown plot name {name!r}; choose from {sorted(PLOTTERS)}")
+        ax = PLOTTERS[name](doc) if name == "structure" else PLOTTERS[name](doc, bias_index=args.bias_index)
+        fig = ax.figure
+        fig.tight_layout()
+        out_path = os.path.join(out_dir, f"{stem}_{name}.png")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(out_path)
+
+
+if __name__ == "__main__":
+    main()

@@ -25,6 +25,9 @@ from mos_solver import cv_sweep, solve_mos_equilibrium
 import mos_analytic as man
 import mos_config as cfg
 import field_save as fsave
+import mos_params as mparams
+import structure_io as sio
+import plot as tplot
 
 OUT = os.path.join(os.path.dirname(__file__), "out")
 os.makedirs(OUT, exist_ok=True)
@@ -189,13 +192,90 @@ def main():
     fields_csv = os.path.join(OUT, "mos_fields_by_bias.csv")
     fsave.save_fields(results, save_idx, "VG", fields_csv, x, is_oxide=g["is_oxide"])
 
+    # ================= Structure + textbook band/charge diagrams =================
+    def regime_of(VG):
+        if is_p_sub:
+            if VG < V_FB:
+                return "accumulation"
+            return "inversion" if VG > V_T else "depletion"
+        else:
+            if VG > V_FB:
+                return "accumulation"
+            return "inversion" if VG < V_T else "depletion"
+
+    struct_bias_points = []
+    for i in save_idx:
+        r = results[i]
+        struct_bias_points.append({
+            "label": f"V_G={r['VG']:.2f} V", "bias": r["VG"], "regime": regime_of(r["VG"]),
+            "fields": {"psi": r["psi"], "n": r["n"], "p": r["p"], "phin": r["phin"], "phip": r["phip"]},
+        })
+
+    is_oxide = g["is_oxide"]
+    chi_per_node = np.where(is_oxide, mparams.CHI_OX_EV, mat.chi_eV)
+    Eg_per_node = np.where(is_oxide, mparams.EG_OX_EV, mat.Eg_eV)
+
+    struct_doc = sio.save_structure(
+        os.path.join(OUT, "mos_structure.json"),
+        device="mos",
+        material={"eps_r": mat.eps_r, "ni_cm3": mat.ni, "T": mat.T,
+                  "chi_eV": chi_per_node, "Eg_eV": Eg_per_node},
+        regions=[
+            {"name": f"oxide ({dev.t_ox*1e7:.1f} nm)", "x_range_um": [-dev.t_ox * 1e4, 0.0],
+             "kind": "insulator", "doping_type": None},
+            {"name": f"{'p' if is_p_sub else 'n'}-substrate (~{abs(Cdop_substrate):.0e})",
+             "x_range_um": [0.0, g["t_si"] * 1e4],
+             "kind": "semiconductor", "doping_type": "p" if is_p_sub else "n"},
+        ],
+        x_um=x_um, doping_cm3=Cdop, bias_points=struct_bias_points,
+    )
+
+    band_charge_xlim = (-dev.t_ox * 1e4 * 3, zoom_um)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 2.8))
+    tplot.plot_structure(struct_doc, ax=axes[0])
+    tplot.plot_structure(struct_doc, ax=axes[1], xlim_um=(-dev.t_ox * 1e4 * 1.5, dev.t_ox * 1e4 * 1.5))
+    axes[0].set_title("Full device")
+    axes[1].set_title("Zoom on the oxide/substrate interface")
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "05_structure.png"), dpi=150)
+    plt.close(fig)
+
+    # The oxide (nm-scale) is invisible next to the substrate depletion
+    # region (um-scale) on one shared x-axis, so - as with the structure
+    # plot above - band/charge diagrams get their own oxide-zoom panel
+    # alongside the substrate-zoom one.
+    mid_idx = len(struct_bias_points) // 2
+    oxide_xlim = (-dev.t_ox * 1e4 * 1.5, dev.t_ox * 1e4 * 3)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    tplot.plot_bands(struct_doc, bias_index=mid_idx, ax=axes[0], xlim_um=oxide_xlim)
+    tplot.plot_bands(struct_doc, bias_index=mid_idx, ax=axes[1], xlim_um=band_charge_xlim)
+    axes[0].set_title("Zoom on the oxide")
+    axes[1].set_title("Zoom on the substrate depletion region")
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "06_band_diagram.png"), dpi=150)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    tplot.plot_charge(struct_doc, bias_index=mid_idx, ax=axes[0], xlim_um=oxide_xlim)
+    tplot.plot_charge(struct_doc, bias_index=mid_idx, ax=axes[1], xlim_um=band_charge_xlim)
+    axes[0].set_title("Zoom on the oxide")
+    axes[1].set_title("Zoom on the substrate depletion region")
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "07_charge_density.png"), dpi=150)
+    plt.close(fig)
+
     print(f"\nPlots and data written to: {OUT}")
     print("  01_cv_curve.png")
     print("  02_band_diagram.png")
     print("  03_carrier_profiles.png")
     print("  04_quasi_fermi_potentials.png")
+    print("  05_structure.png")
+    print("  06_band_diagram.png (textbook Ec/Ev/Ei/Ef)")
+    print("  07_charge_density.png")
     print("  cv_sweep.csv")
     print("  mos_fields_by_bias.csv")
+    print("  mos_structure.json  (standalone: python3 plot.py out/mos_structure.json)")
 
 
 if __name__ == "__main__":
