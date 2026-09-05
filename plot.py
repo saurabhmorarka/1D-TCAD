@@ -231,24 +231,32 @@ def plot_charge(doc, bias_index=0, ax=None, xlim_um=None, fields=None):
 PLOTTERS = {"structure": plot_structure, "bands": plot_bands, "charge": plot_charge}
 
 
-def _interactive_show(ax):
-    """Open a live matplotlib window with a checkbox per curve already
-    drawn on `ax`, toggling that curve's visibility on click. Only makes
-    sense with a real (non-Agg) backend, i.e. --interactive on the CLI
-    below, which picks the backend before pyplot is ever imported."""
+def _interactive_show(axes):
+    """Open one live matplotlib window covering all of `axes` side by side,
+    with a single checkbox panel listing every labeled curve across all of
+    them - so opening a structure file interactively just works, with
+    every field already loaded and available to toggle on/off, rather than
+    requiring the plot type to be picked on the command line first. Only
+    makes sense with a real (non-Agg) backend, i.e. --interactive on the
+    CLI below, which picks the backend before pyplot is ever imported."""
     from matplotlib.widgets import CheckButtons
 
-    fig = ax.figure
-    lines = [l for l in ax.get_lines() if l.get_label() and not l.get_label().startswith("_")]
+    axes = list(axes)
+    fig = axes[0].figure
+    lines = [l for ax in axes for l in ax.get_lines()
+             if l.get_label() and not l.get_label().startswith("_")]
     if lines:
         labels = [l.get_label() for l in lines]
-        fig.subplots_adjust(right=0.78)
-        check_ax = fig.add_axes([0.80, 0.35, 0.18, 0.3])
+        fig.subplots_adjust(right=0.82)
+        check_ax = fig.add_axes([0.84, 0.3, 0.15, 0.4])
         check = CheckButtons(check_ax, labels, [l.get_visible() for l in lines])
 
         def toggle(label):
-            line = lines[labels.index(label)]
-            line.set_visible(not line.get_visible())
+            # Toggle every line with this label (a curve can legitimately
+            # appear on more than one of the shown axes).
+            for l in lines:
+                if l.get_label() == label:
+                    l.set_visible(not l.get_visible())
             fig.canvas.draw_idle()
 
         check.on_clicked(toggle)
@@ -275,9 +283,10 @@ def main():
     parser.add_argument("--out-dir", default=None,
                          help="Directory to write PNGs into (default: alongside the structure file)")
     parser.add_argument("--interactive", action="store_true",
-                         help="Open a live window with checkboxes to toggle curves on/off, "
-                              "instead of saving a PNG. Requires a local display, and exactly "
-                              "one --which plot.")
+                         help="Open one live window with every --which plot side by side and a "
+                              "single checkbox panel to toggle any of their curves on/off - just "
+                              "run with a structure file and this flag, no --which/--*-fields "
+                              "needed up front. Requires a local display.")
     args = parser.parse_args()
 
     doc = sio.load_structure(args.structure_path)
@@ -285,30 +294,35 @@ def main():
     for name in which:
         if name not in PLOTTERS:
             raise SystemExit(f"Unknown plot name {name!r}; choose from {sorted(PLOTTERS)}")
-    if args.interactive and len(which) != 1:
-        raise SystemExit("--interactive needs exactly one --which plot (structure, bands, or charge)")
 
     band_fields = args.band_fields.split(",") if args.band_fields else None
     charge_fields = args.charge_fields.split(",") if args.charge_fields else None
+
+    def make(name, ax=None):
+        kwargs = {} if name == "structure" else {"bias_index": args.bias_index}
+        if name == "bands" and band_fields:
+            kwargs["fields"] = band_fields
+        if name == "charge" and charge_fields:
+            kwargs["fields"] = charge_fields
+        return PLOTTERS[name](doc, ax=ax, **kwargs)
+
+    if args.interactive:
+        fig, axes_raw = plt.subplots(1, len(which), figsize=(6.5 * len(which), 5.5), squeeze=False)
+        axes = axes_raw[0]
+        for ax, name in zip(axes, which):
+            make(name, ax=ax)
+        fig.tight_layout()
+        _interactive_show(axes)
+        return
 
     out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.structure_path)) or "."
     os.makedirs(out_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(args.structure_path))[0]
 
     for name in which:
-        kwargs = {} if name == "structure" else {"bias_index": args.bias_index}
-        if name == "bands" and band_fields:
-            kwargs["fields"] = band_fields
-        if name == "charge" and charge_fields:
-            kwargs["fields"] = charge_fields
-        ax = PLOTTERS[name](doc, **kwargs)
+        ax = make(name)
         fig = ax.figure
         fig.tight_layout()
-
-        if args.interactive:
-            _interactive_show(ax)
-            continue
-
         out_path = os.path.join(out_dir, f"{stem}_{name}.png")
         fig.savefig(out_path, dpi=150)
         plt.close(fig)

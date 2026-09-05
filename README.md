@@ -75,7 +75,7 @@ python3 main.py
   ```bash
   python3 plot.py out/diode_structure.json                          # all three plots, all curves
   python3 plot.py out/diode_structure.json --which bands --band-fields Ec,Ev,Ef
-  python3 plot.py out/diode_structure.json --which bands --interactive  # click curves on/off live
+  python3 plot.py out/diode_structure.json --interactive               # one window, all fields loaded, click to toggle
   ```
 
   ![Diode band diagram](out/08_band_diagram.png)
@@ -174,7 +174,7 @@ python3 mos_main.py
 | `mos_solver.py` | MOS-cap equilibrium C-V sweep (low-frequency) and frozen-carrier quasi-small-signal sweep (high-frequency) |
 | `field_save.py` | Shared helper: selecting which bias points to save full field profiles for, quasi-Fermi-potential plotting, field CSV export |
 | `structure_io.py` | Schema + save/load for the `*_structure.json` files each driver writes: device geometry, mesh, doping, and per-bias fields, in one human-readable file `plot.py` (or a future 2D/3D version of this project) can read back |
-| `plot.py` | Structure/band-diagram/charge-density plot library, driven from a loaded structure file. Also runnable standalone against just a `*_structure.json`, with `--which`/`--band-fields`/`--charge-fields` to pick plots/curves and `--interactive` for a live checkbox viewer: `python3 plot.py out/diode_structure.json --which bands --interactive` |
+| `plot.py` | Structure/band-diagram/charge-density plot library, driven from a loaded structure file. Also runnable standalone against just a `*_structure.json`: `python3 plot.py out/diode_structure.json --interactive` opens one window with every plot and field already loaded, click a checkbox to toggle a curve; `--which`/`--band-fields`/`--charge-fields` narrow down what gets drawn (in either interactive or plain PNG mode) |
 | `main.py` | Diode driver: runs the sweep with both solvers (for the benchmark) plus the one from `input_diode.yaml`, generates plots and CSVs in `out/` |
 | `mos_main.py` | MOS-cap driver: runs the C-V sweep, generates plots and CSVs in `out/` |
 

@@ -906,3 +906,22 @@ Feedback on the first pass of this feature raised two things:
    already dispatch on `doc["dim"]` for exactly this reason, but the
    `--interactive` CLI mechanism itself (one shared axes, one checkbox per
    line) is a 1D-only starting point, not a finished design.
+
+   The first cut of `--interactive` still required picking one `--which`
+   plot up front (`--which bands --interactive`), on the reasoning that
+   the checkboxes were keyed to one shared axes. In practice this was
+   exactly backwards from how someone actually wants to use it: handed
+   only a `*_structure.json` file, the point of an interactive session is
+   to explore it *without* already knowing which plot/fields they want -
+   `python3 plot.py out/diode_structure.json --interactive` errored
+   immediately asking for a choice that should have been made inside the
+   session, not on the command line. Fixed by dropping the one-plot
+   restriction: `--interactive` now always builds every `--which` plot
+   (all three by default) into one figure with side-by-side subplots, and
+   `_interactive_show()` takes the whole list of axes, collecting every
+   labeled curve across all of them into a single checkbox panel (toggling
+   every line sharing a clicked label, in case a curve is ever drawn on
+   more than one of the shown axes). `--which`/`--band-fields`/
+   `--charge-fields` still work in interactive mode - they narrow what
+   gets loaded in the first place - but are no longer required just to
+   get the session open.
