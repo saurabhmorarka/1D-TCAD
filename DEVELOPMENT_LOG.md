@@ -925,3 +925,171 @@ Feedback on the first pass of this feature raised two things:
    `--charge-fields` still work in interactive mode - they narrow what
    gets loaded in the first place - but are no longer required just to
    get the session open.
+
+## 13. Session 7: a real (depletable) polysilicon gate, two numerics bugs
+    it exposed, and a regression test suite
+
+### 13.1 The ask: model poly-gate depletion, not just an ideal metal gate
+
+Every MOS-cap example so far modeled the gate as an ideal metal: a
+Dirichlet contact sitting directly on the oxide, with no carriers of its
+own (`ni=0` there) and therefore no way for the gate side to develop its
+own band-bending. Real CMOS gate stacks (before high-k/metal-gate
+processes) use doped polysilicon instead, and a poly gate that isn't
+doped heavily enough can itself partially deplete near the oxide interface
+under bias - the "polysilicon depletion effect", one of the reasons real
+processes eventually moved to metal gates. The ask was to add this as a
+genuine third region (metal contact - poly - oxide - substrate) rather
+than a metal-gate approximation, and to see it actually show up as a
+doping-dependent dent in the C-V curve: near-metal at very high poly
+doping (~1e20 cm^-3), visibly depleting at lower doping.
+
+### 13.2 Why this was architecturally cheap, and where it wasn't
+
+`physics.solve_poisson` already accepted arbitrary per-node `ni` and
+per-edge `eps` arrays - that's exactly what already let oxide (`ni=0`)
+sit next to substrate (`ni=mat.ni`) in every prior MOS-cap example. Adding
+a poly-gate region turned out to be "just" a third segment of those same
+arrays: `mesh.build_mos_grid` gained an optional `Cdop_gate` parameter
+that, when given, meshes a poly region between the outer contact and the
+oxide (same interface-refined/geometric-growth scheme as the substrate,
+mirrored so the fine spacing sits at the poly/oxide interface), and
+`MOSDevice` gained `gate_kind`/`gate_profile`/`t_gate` alongside the
+existing metal-only `gate_workfunction_eV`. `mos_config.py` parses a new
+`gate.type: poly` YAML block (polarity + doping profile + optional
+thickness, same schema shape as `substrate.doping`) independent of the
+substrate's own polarity, so an n-substrate/p+-poly combination works
+exactly the same way as the p-substrate/n+-poly example that ships by
+default.
+
+What was NOT cheap - and is exactly why this session ended up finding two
+real numerics bugs rather than zero - is that every previous Dirichlet
+boundary condition in this codebase sat on a node with `ni=0` (an ideal
+metal, or an ohmic contact whose bias never actually varies). The poly
+gate is the first Dirichlet contact in this project sitting on a node
+with real carriers AND a bias-dependent target potential, and that
+combination broke two assumptions that had never been exercised before.
+
+### 13.3 Bug 1: Dirichlet-row pivoting dilution in `solve_poisson`
+
+First symptom: `psi` at the poly/oxide interface came out bit-for-bit
+identical across the entire VG sweep, as if the boundary condition simply
+wasn't propagating past the first couple of mesh nodes. Tracing a single
+Newton iteration by hand (see the debugging note in `physics.py`) found
+the actual cause: `physics.solve_poisson`'s Dirichlet rows used a bare
+`diag[0] = 1.0`, relying on that row's own equation (`1*delta_0 = 0`) to
+keep the boundary's Newton update at exactly zero. That's fine when
+nearby coefficients are order-1, but the poly's short Debye length forces
+an extremely fine mesh at the interface (sub-Angstrom spacing at
+`interface_spacing_debye_factor=0.001`), and a bad early Newton iterate
+(psi far from local equilibrium at that first carrier-bearing node) drove
+the electron density there to ~1e34 cm^-3 - astronomically past anything
+physical. `scipy.sparse.linalg.spsolve`'s partial pivoting, seeing a
+neighboring row's coefficient vastly exceed the Dirichlet row's bare 1.0
+in that column, pivoted onto the neighboring row instead, silently
+leaking a nonzero value into what had to be an exact zero. Fixed by
+scaling the Dirichlet diagonal to the local Laplacian-coefficient
+magnitude (`max(1.0, lap_coeff_m[0])`), which guarantees it stays the
+largest entry in its column regardless of how badly conditioned the
+charge term elsewhere gets. This is a general robustness fix (applies to
+every example, not just the poly gate) and was verified not to change any
+existing diode/metal-gate numeric result at all.
+
+### 13.4 Bug 2: quasi-Fermi levels can't be flat 0 once the gate has carriers
+
+Fixing bug 1 wasn't enough on its own: `psi` at the contact now correctly
+tracked VG, but everything past the first few mesh nodes - including,
+mysteriously, the *substrate's* own response - still came out completely
+VG-independent. The actual cause was a modeling gap, not a numerics bug:
+`solve_mos_equilibrium` set `phin = phip = 0` at every node, applying VG
+purely as an electrostatic-potential offset at the boundary. That's
+correct ONLY when the gate has no mobile carriers (the ideal-metal case -
+`ni=0` there, so `phin` is moot regardless of value). With a real poly
+gate, `n = ni*exp((psi-phin)/Vt)` at the contact swings exponentially with
+VG while `phin` stays pinned at 0 - an artificial charge spike with no
+physical basis, which screens itself out within nanometers (Debye
+screening doing exactly what it's supposed to, just in response to a
+spurious perturbation) and made the rest of the structure look
+untouched. The fix follows directly from what "applying a voltage between
+two contacts" actually means physically: since the MOS cap carries zero
+current in steady state, each side of the oxide is independently in
+local equilibrium with ITS OWN contact, so the two sides' quasi-Fermi
+levels should be split by VG, not shared - `phin = phip = np.where(x < 0,
+VG, 0.0)`, with the step falling inside the carrier-free oxide where its
+exact placement is physically moot. Applying this split unconditionally
+(not just when a poly gate is present) is harmless for the metal-gate
+case for the same `ni=0` reason, and was confirmed bit-identical there.
+
+A third, smaller instance of the same class of bug turned up while
+building a doping-dependent comparison plot (13.5): the high-frequency
+C-V calculation freezes the substrate's minority carrier so it can't
+respond to a small VG perturbation, but was freezing that carrier
+species *everywhere*, including inside the poly - for an n+ poly,
+electrons are its own majority carrier, so freezing them there pinned the
+whole poly and collapsed every high-frequency curve to ~0 regardless of
+doping. Fixed by restricting the freeze mask to the substrate side
+(`x >= 0`) only, in `mos_solver.cv_sweep`.
+
+The common thread across all three: this codebase's MOS-cap boundary
+conditions had only ever been exercised on carrier-free (metal/oxide)
+nodes before. Adding the first real semiconductor-to-semiconductor-via-
+insulator boundary condition (poly - oxide - substrate) exposed every
+place an assumption ("this node has no carriers, so X doesn't matter")
+had quietly been baked in without ever being written down.
+
+### 13.5 Two ways to view the result: one doping, or a doping sweep
+
+Two example scripts ship side by side rather than one replacing the
+other, since they answer different questions: `input_mos_poly.yaml` (run
+via the existing `mos_main.py input_mos_poly.yaml`) is "what does the C-V
+look like for one specific poly doping", while the new `mos_poly_sweep.py`
+(driven by the same YAML, overriding only the gate doping concentration)
+overlays six doping levels (1e17 through 1e22 cm^-3) on one C-V plot to
+show the trend directly. The result matches the requested story cleanly:
+at VG=+1V, C/Cox rises monotonically from 0.07 (1e17) through 0.90 (1e21)
+to 0.95 (1e22), with diminishing returns each decade (the poly's own
+series capacitance improves roughly as sqrt(N), so each additional decade
+of doping helps less as it approaches the asymptotic ceiling) - while the
+accumulation branch (majority-carrier electrons piling up, which any
+reasonable doping handles easily) is nearly doping-independent. Both
+example voltage sweeps were widened (`input_mos.yaml` to -1..+2V,
+`input_mos_poly.yaml` to -2..+1V) after the first pass showed the C-V
+curves hadn't yet saturated toward `C_ox` at the original +-1V ends -
+confirmed to be normal asymptotic approach (matches Sze's textbook shape),
+not a bug.
+
+One open caveat, tying back to a standing scope note (see the
+"tcad1d-known-physics-simplifications" reminder): 1e20-1e22 cm^-3 doping
+is above silicon's effective conduction-band density of states
+(Nc~2.8e19), i.e. genuinely degenerate - this solver still uses
+Maxwell-Boltzmann statistics throughout, so the exact "how close to
+ideal-metal" numbers at the highest dopings tested should be trusted
+qualitatively (higher doping is closer to metal-like) but not
+quantitatively without a Fermi-Dirac correction.
+
+### 13.6 A regression test suite, built to catch exactly the bugs above
+
+With three real, previously-latent bugs found in one session, the next
+question was how to avoid needing to re-find the next one by hand. Added
+`testsuite/`: `common.py` calls each of the four examples' own
+config/mesh/solver functions directly (no plotting, no file I/O) and
+returns a small dict of scalar summary metrics - `Cox`, `V_FB`, `V_T`,
+`Vbi`, `I0`, and C/I sampled at a few representative sweep points, chosen
+deliberately small rather than a full field-by-field dump so the suite
+stays robust to harmless changes (mesh tuning, plot styling) while still
+catching the order-of-magnitude/collapsed-to-zero signature every bug
+this session actually produced. `golden/*.json` holds today's
+already-verified numbers; `test_examples.py` reruns each example and
+diffs against golden with `rtol=1e-3`; `capture_golden.py` regenerates a
+golden file deliberately, meant to be run only after independently
+verifying a change is correct, never just to make a failing test go
+green.
+
+Verified the suite actually catches something, not just tautologically
+passing against its own just-captured snapshot: temporarily reintroduced
+the bug 2 fix (`phin = phip = np.zeros(N)`) and reran the suite - both
+poly-gate tests failed immediately with exactly the collapsed-to-zero
+symptom that had originally been debugged by hand, while the diode and
+metal-gate tests correctly stayed green (the bug is poly-specific).
+Restored the fix and confirmed all four tests pass again before
+committing.

@@ -142,10 +142,6 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
         diag = np.zeros(N)
         upper = np.zeros(N)
 
-        # Dirichlet rows
-        diag[0] = 1.0
-        diag[-1] = 1.0
-
         dn_dpsi = np.where(n_frozen_mask, 0.0, n / Vt)    # frozen -> no psi-dependence
         dp_dpsi = np.where(p_frozen_mask, 0.0, -p / Vt)   # frozen -> no psi-dependence
         F[1:-1] = (lap_coeff_p * (psi[2:] - psi[1:-1]) - lap_coeff_m * (psi[1:-1] - psi[:-2])) \
@@ -153,6 +149,26 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
         lower[1:-1] = lap_coeff_m
         upper[1:-1] = lap_coeff_p
         diag[1:-1] = -(lap_coeff_m + lap_coeff_p) - Q * (dn_dpsi[1:-1] - dp_dpsi[1:-1])
+
+        # Dirichlet rows: F=0 here always forces the boundary's Newton update
+        # to exactly 0 (psi[0]/psi[-1] stay pinned at their initial-guess
+        # value) *only* if the row's own diagonal actually stays the pivot
+        # spsolve's partial pivoting selects for that column. diag=1 is fine
+        # numerically when nearby coefficients are O(1)-ish, but a short
+        # Debye length (fine mesh -> huge lap_coeff) combined with a bad
+        # early Newton iterate (huge exp-driven charge term) can make the
+        # neighboring interior row's coupling entry into this column
+        # (lower[1] resp. upper[-2], both pure lap_coeff, unaffected by the
+        # charge blowup) outweigh a bare 1.0, so the solver pivots onto that
+        # row instead and silently leaks a nonzero, wrong value into what
+        # must be an exact zero. Scaling the Dirichlet diagonal to the local
+        # lap_coeff magnitude guarantees it stays the largest entry in its
+        # column, so pivoting can never dilute the boundary condition -
+        # caught via the poly-gate MOS-cap case (mesh.build_mos_grid with
+        # Cdop_gate), where the poly's short Debye length makes this a real
+        # (not just theoretical) failure mode.
+        diag[0] = max(1.0, lap_coeff_m[0] if len(lap_coeff_m) else 1.0)
+        diag[-1] = max(1.0, lap_coeff_p[-1] if len(lap_coeff_p) else 1.0)
 
         J = sp.diags([lower[1:], diag, upper[:-1]], offsets=[-1, 0, 1], format="csc")
         delta = spla.spsolve(J, F)

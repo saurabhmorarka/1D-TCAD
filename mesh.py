@@ -161,33 +161,54 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
 def build_mos_grid(mat: Material, dev, Cdop_substrate: float,
                     n_ox_points: int = 15, growth: float = 1.08,
                     bulk_spacing_debye_factor: float = 5.0,
-                    interface_spacing_debye_factor: float = 0.001):
+                    interface_spacing_debye_factor: float = 0.001,
+                    Cdop_gate: float = None):
     """Build the oxide+substrate mesh and per-node doping/eps/ni arrays for
-    the 1D MOS capacitor: metal gate - thin oxide - substrate.
+    the 1D MOS capacitor. Two gate models:
+
+      Cdop_gate=None (default): ideal metal gate - a Dirichlet contact
+      sitting directly on the oxide, x=0 at the gate/oxide interface,
+      oxide occupying x in [-t_ox, 0), substrate x in [0, t_si]. This is
+      the original behavior, unchanged.
+
+      Cdop_gate given: a real, depletable polysilicon gate - a THIRD region
+      (dev.gate_profile / dev.t_gate) is meshed between the outer metal
+      contact and the oxide, x=0 still at the oxide/substrate interface but
+      now x in [-t_gate-t_ox, -t_ox) is doped silicon (not an ideal
+      conductor), so it can develop its own depletion layer right at the
+      oxide interface, same physics as the substrate side. Meshed with the
+      same interface-refinement-near-the-oxide / geometric-growth-away
+      scheme as the substrate, using the gate's OWN Debye length, mirrored
+      to put the fine spacing at the gate/oxide interface instead of at x=0.
 
     Substrate type (p or n) is generic here: Cdop_substrate's SIGN selects
     it (negative=p, positive=n; magnitude is the reference substrate doping
     used by the closed-form comparisons) - mos_solver.py picks which
     carrier to freeze for the high-frequency C-V trick from that sign.
+    Cdop_gate follows the same sign convention for the poly gate.
     `interface_spacing_debye_factor` defaults much tighter than the diode's
     equivalent (0.05): a mesh-convergence check showed the MOS-cap C-V curve
     is genuinely under-resolved at the coarser factor in strong
     accumulation - see DEVELOPMENT_LOG.md.
 
     Returns dict with:
-      x          : node positions, cm, x=0 at the gate/oxide interface,
-                   oxide occupying x in [-t_ox, 0), substrate x in [0, t_si]
-      Cdop       : net doping, cm^-3 (0 in oxide, signed substrate profile
-                   sample in the substrate)
+      x          : node positions, cm, x=0 at the oxide/substrate interface
+      Cdop       : net doping, cm^-3 (0 in oxide, signed profile sample in
+                   each semiconductor region)
       eps_edge   : permittivity per mesh edge, length len(x)-1
-      ni_arr     : intrinsic concentration per node (0 in oxide, mat.ni in substrate)
+      ni_arr     : intrinsic concentration per node (0 in oxide, mat.ni elsewhere)
       is_oxide   : boolean mask, True for oxide nodes
       oxide_index: index of the oxide/substrate interface node (first substrate node)
+      gate_oxide_index: index of the LAST poly-gate node (the node immediately
+                   on the gate side of the oxide) - equal to 0 for an ideal
+                   metal gate (Cdop_gate=None), since then x[0] itself is
+                   the gate/oxide interface.
       t_si       : substrate thickness actually used
+      t_gate     : poly gate thickness actually used (0.0 for a metal gate)
     """
     substrate_profile = (dev.substrate_profile if dev.substrate_profile is not None
                           else DopingProfile.flat(abs(Cdop_substrate)))
-    sign = 1.0 if Cdop_substrate >= 0 else -1.0
+    sign_sub = 1.0 if Cdop_substrate >= 0 else -1.0
 
     L_D = _debye_length(mat, substrate_profile.reference_concentration())
     h_min = interface_spacing_debye_factor * L_D
@@ -198,17 +219,59 @@ def build_mos_grid(mat: Material, dev, Cdop_substrate: float,
     x_ox = -np.linspace(dev.t_ox, 0.0, n_ox_points)[::-1]  # -t_ox .. 0, n_ox_points points, uniform
     x_si = _region_nodes(t_si, substrate_profile, mat, h_min, h_max, growth)  # 0 .. t_si
 
-    x = np.concatenate([x_ox[:-1], x_si])  # drop duplicate 0 from x_ox
-    x = np.unique(x)
+    if Cdop_gate is None:
+        x = np.concatenate([x_ox[:-1], x_si])  # drop duplicate 0 from x_ox
+        x = np.unique(x)
 
-    oxide_index = int(np.searchsorted(x, 0.0))  # first node with x>=0 -> substrate side
-    is_oxide = x < 0.0
+        oxide_index = int(np.searchsorted(x, 0.0))
+        is_oxide = x < 0.0
+        gate_oxide_index = 0
+        t_gate = 0.0
 
-    Cdop = np.where(is_oxide, 0.0, sign * substrate_profile.sample(np.clip(x, 0.0, None), t_si))
-    ni_arr = np.where(is_oxide, 0.0, mat.ni)
+        Cdop = np.where(is_oxide, 0.0, sign_sub * substrate_profile.sample(np.clip(x, 0.0, None), t_si))
+        ni_arr = np.where(is_oxide, 0.0, mat.ni)
+    else:
+        gate_profile = (dev.gate_profile if dev.gate_profile is not None
+                         else DopingProfile.flat(abs(Cdop_gate)))
+        sign_gate = 1.0 if Cdop_gate >= 0 else -1.0
+
+        L_D_gate = _debye_length(mat, gate_profile.reference_concentration())
+        h_min_gate = interface_spacing_debye_factor * L_D_gate
+        h_max_gate = bulk_spacing_debye_factor * L_D_gate
+        t_gate = dev.t_gate if dev.t_gate is not None else max(20 * L_D_gate, 2.0e-4)
+
+        # Same _region_nodes scheme as the substrate (fine near depth=0,
+        # coarsening outward), but the gate's depth=0 is at the oxide
+        # interface (x=-t_ox), so it's built outward-then-flipped-and-shifted
+        # to put the fine end next to the oxide, mirroring how the diode's
+        # p-side is built (see build_diode_grid).
+        x_gate_depth = _region_nodes(t_gate, gate_profile, mat, h_min_gate, h_max_gate, growth)
+        x_gate = -dev.t_ox - x_gate_depth[::-1]  # -(t_gate+t_ox) .. -t_ox
+
+        x = np.concatenate([x_gate[:-1], x_ox[:-1], x_si])
+        x = np.unique(x)
+
+        oxide_index = int(np.searchsorted(x, 0.0))
+        # Last node STRICTLY inside the poly (is_gate_semi = x < -t_ox below) -
+        # the node exactly at x=-t_ox belongs to the oxide side (is_oxide,
+        # ni=0, no carriers), so it must not be reported as "the poly
+        # surface" or semiconductor_charge/the poly-depletion diagnostic
+        # would read a node with no physics on it and see no VG dependence.
+        gate_oxide_index = int(np.searchsorted(x, -dev.t_ox, side="left")) - 1
+        is_oxide = (x >= -dev.t_ox) & (x < 0.0)
+        is_gate_semi = x < -dev.t_ox
+
+        depth_in_gate = np.clip(-dev.t_ox - x, 0.0, None)  # 0 at gate/oxide interface
+        Cdop = np.where(
+            is_oxide, 0.0,
+            np.where(is_gate_semi,
+                     sign_gate * gate_profile.sample(depth_in_gate, t_gate),
+                     sign_sub * substrate_profile.sample(np.clip(x, 0.0, None), t_si)),
+        )
+        ni_arr = np.where(is_oxide, 0.0, mat.ni)
 
     x_mid = (x[:-1] + x[1:]) / 2.0
-    eps_edge = np.where(x_mid < 0.0, dev.eps_ox, mat.eps)
+    eps_edge = np.where((x_mid >= -dev.t_ox) & (x_mid < 0.0), dev.eps_ox, mat.eps)
 
     return {
         "x": x,
@@ -217,7 +280,9 @@ def build_mos_grid(mat: Material, dev, Cdop_substrate: float,
         "ni_arr": ni_arr,
         "is_oxide": is_oxide,
         "oxide_index": oxide_index,
+        "gate_oxide_index": gate_oxide_index,
         "t_si": t_si,
+        "t_gate": t_gate,
         "h_min": h_min,
         "h_max": h_max,
         "substrate_profile": substrate_profile,

@@ -41,9 +41,9 @@ mesh:
                                             # see mesh.py / DEVELOPMENT_LOG.md
 
 voltage_sweep:
-  start_V: -0.5
-  stop_V: 1.0
-  points: 61
+  start_V: -1.0
+  stop_V: 2.0
+  points: 121
 
 output:
   # Which V_G values (nearest swept match) to save full spatial field

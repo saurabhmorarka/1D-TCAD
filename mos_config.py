@@ -20,7 +20,8 @@ def load_config(path: str = DEFAULT_PATH) -> dict:
 
 
 def build_from_config(cfg: dict):
-    """Returns (Material, MOSDevice, Cdop_substrate, VG_array, save_bias_points, mesh_opts, structure_file)."""
+    """Returns (Material, MOSDevice, Cdop_substrate, VG_array, save_bias_points,
+    mesh_opts, structure_file, Cdop_gate)."""
     mat = Material()
     dev = MOSDevice()
 
@@ -39,7 +40,26 @@ def build_from_config(cfg: dict):
         dev.eps_ox_r = float(oxide["eps_r"])
 
     gate = cfg.get("gate") or {}
-    dev.gate_workfunction_eV = gate.get("workfunction_eV", None)
+    gate_type = gate.get("type", "metal")
+    Cdop_gate = None
+    if gate_type == "metal":
+        dev.gate_kind = "metal"
+        dev.gate_workfunction_eV = gate.get("workfunction_eV", None)
+    elif gate_type == "poly":
+        # A real, depletable polysilicon gate instead of an ideal metal
+        # contact right on the oxide - see mesh.build_mos_grid and
+        # mos_solver.solve_mos_equilibrium for what Cdop_gate triggers.
+        dev.gate_kind = "poly"
+        gate_polarity = gate.get("polarity")
+        if gate_polarity not in ("p", "n"):
+            raise ValueError(f"gate.polarity must be 'p' or 'n' when gate.type is 'poly', got {gate_polarity!r}")
+        dev.gate_profile = dp.parse_doping_profile(gate.get("doping") or {}, 1.0e20)
+        Na_gate = dev.gate_profile.reference_concentration()
+        Cdop_gate = -Na_gate if gate_polarity == "p" else Na_gate
+        if "thickness_nm" in gate:
+            dev.t_gate = float(gate["thickness_nm"]) * 1e-7
+    else:
+        raise ValueError(f"gate.type must be 'metal' or 'poly', got {gate_type!r}")
 
     mesh_cfg = cfg.get("mesh") or {}
     mesh_opts = dict(
@@ -56,4 +76,4 @@ def build_from_config(cfg: dict):
     save_bias_points = output_cfg.get("save_bias_points", "last")
     structure_file = output_cfg.get("structure_file", "mos_structure.json")
 
-    return mat, dev, Cdop_substrate, VG_list, save_bias_points, mesh_opts, structure_file
+    return mat, dev, Cdop_substrate, VG_list, save_bias_points, mesh_opts, structure_file, Cdop_gate

@@ -32,12 +32,31 @@ import mos_analytic as man
 def solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevice,
                            Cdop_substrate, VG, psi_bulk,
                            psi_init=None, n_frozen=None, p_frozen=None,
-                           damping_cap=0.5, max_iter=200):
+                           damping_cap=0.5, max_iter=200, Cdop_gate=None):
     """Single-gate-voltage equilibrium (or quasi-small-signal, if
-    n_frozen/p_frozen given) solve. Returns dict with psi, n, p, iters."""
+    n_frozen/p_frozen given) solve. Returns dict with psi, n, p, iters.
+
+    Cdop_gate=None (default): ideal metal gate, x[0] is the gate/oxide
+    interface and its Dirichlet BC comes from the work-function-based
+    flat-band voltage (mos_analytic.flatband_voltage) - original behavior.
+
+    Cdop_gate given: real poly gate (see mesh.build_mos_grid). x[0] is now
+    the OUTER metal contact on top of the poly, an ohmic contact - same
+    convention used at the substrate's back contact (x[-1]): the contact
+    potential is the poly's own charge-neutral equilibrium potential plus
+    the applied bias, with no separate flat-band-voltage bookkeeping. The
+    poly's band bending (and any depletion right at the oxide interface)
+    then falls out of the Poisson solve itself, self-consistently, exactly
+    like the substrate's does - no new physics, just a third semiconductor
+    region for the same solver to see.
+    """
     N = len(x)
-    V_FB = man.flatband_voltage(dev, mat, Cdop_substrate)
-    psi_gate_bc = psi_bulk + (VG - V_FB)
+    if Cdop_gate is None:
+        V_FB = man.flatband_voltage(dev, mat, Cdop_substrate)
+        psi_gate_bc = psi_bulk + (VG - V_FB)
+    else:
+        psi_bulk_gate = ph.equilibrium_bulk_potential(mat, Cdop_gate)
+        psi_gate_bc = psi_bulk_gate + VG
 
     if psi_init is None:
         frac = np.linspace(1.0, 0.0, N)
@@ -47,8 +66,28 @@ def solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevi
     psi_guess[0] = psi_gate_bc
     psi_guess[-1] = psi_bulk
 
-    phin = np.zeros(N)
-    phip = np.zeros(N)
+    # Quasi-Fermi levels: flat 0 everywhere is correct ONLY when the gate has
+    # no mobile carriers of its own (the ideal metal case - ni_arr=0 there,
+    # so phin/phip are moot regardless of value). A real poly gate has real
+    # carriers, and since the MOS cap carries zero current in steady state,
+    # each side of the oxide is independently in local equilibrium with ITS
+    # OWN contact - there is no reason the two sides should share one Fermi
+    # level once a bias VG is applied between them (that's specifically what
+    # "applying a voltage" means: splitting the two contacts' electrochemical
+    # potentials by qV). So phin/phip must be VG on the gate side and 0 on
+    # the substrate side, with the step falling inside the oxide, where
+    # ni_arr=0 makes its exact placement physically moot. Using a flat 0 for
+    # a poly gate instead (as this used to) forces n=ni*exp((psi-0)/Vt) at
+    # the gate contact even though psi there legitimately carries the full
+    # VG offset - an artificial, exponentially large charge spike with no
+    # physical basis, which screens itself out within nanometers and makes
+    # the entire rest of the structure (and the whole substrate response!)
+    # spuriously look VG-independent. Using x<0 (poly+oxide) vs x>=0
+    # (substrate) as the split is harmless for the ideal metal gate too
+    # (ni_arr=0 on the x<0 side there regardless), so this is applied
+    # unconditionally rather than only for Cdop_gate is not None.
+    phin = np.where(x < 0.0, VG, 0.0)
+    phip = np.where(x < 0.0, VG, 0.0)
     psi, n, p, iters = ph.solve_poisson(
         x, Cdop, mat, phin, phip, psi_guess,
         eps=eps_edge, ni=ni_arr, damping_cap=damping_cap, max_iter=max_iter,
@@ -65,19 +104,26 @@ def solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevi
     return {"psi": psi, "n": n, "p": p, "iters": iters, "VG": VG, "phin": phin, "phip": phip}
 
 
-def semiconductor_charge(x, psi, dev: MOSDevice, oxide_index):
+def semiconductor_charge(x, psi, dev: MOSDevice, oxide_index, gate_oxide_index=0):
     """Total semiconductor-side charge per unit area (C/cm^2), from Gauss's
     law applied to the (uniform, since charge-free) field across the oxide:
-    Q_s = eps_ox * (psi_interface - psi_gate) / t_ox. (Sign checked against
-    accumulation, where excess majority-carrier charge at the surface must
-    come out positive for a p-substrate.)"""
-    psi_gate = psi[0]
+    Q_s = eps_ox * (psi_interface - psi_gate_side) / t_ox. (Sign checked
+    against accumulation, where excess majority-carrier charge at the
+    surface must come out positive for a p-substrate.)
+
+    gate_oxide_index is the node right at the GATE's side of the oxide -
+    for an ideal metal gate that's node 0 itself (the default); for a poly
+    gate (see mesh.build_mos_grid) it's the last poly node, since x[0] is
+    now the outer metal contact further away, across the poly's own
+    (possibly depleted) band-bending."""
+    psi_gate_side = psi[gate_oxide_index]
     psi_interface = psi[oxide_index]
-    return dev.eps_ox * (psi_interface - psi_gate) / dev.t_ox
+    return dev.eps_ox * (psi_interface - psi_gate_side) / dev.t_ox
 
 
 def cv_sweep(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevice,
-             Cdop_substrate, VG_list, oxide_index, dV_hf=2e-3):
+             Cdop_substrate, VG_list, oxide_index, dV_hf=2e-3,
+             Cdop_gate=None, gate_oxide_index=0):
     """Low- and high-frequency C-V sweep across VG_list (with continuation
     for robustness/speed). Returns a list of per-point result dicts."""
     psi_bulk = ph.equilibrium_bulk_potential(mat, Cdop_substrate)
@@ -87,23 +133,29 @@ def cv_sweep(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevice,
     psi_prev = None
     for VG in VG_list:
         lf = solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat, dev, Cdop_substrate,
-                                    VG, psi_bulk, psi_init=psi_prev)
-        Qs_lf = semiconductor_charge(x, lf["psi"], dev, oxide_index)
+                                    VG, psi_bulk, psi_init=psi_prev, Cdop_gate=Cdop_gate)
+        Qs_lf = semiconductor_charge(x, lf["psi"], dev, oxide_index, gate_oxide_index)
 
         # High-frequency point: freeze the MINORITY carrier (electrons for a
         # p-substrate, holes for an n-substrate) at its low-frequency value,
         # perturb VG by a small dV, and only let the majority carrier and
-        # potential respond.
+        # potential respond. This freeze must be restricted to the
+        # SUBSTRATE side (x>=0): with a poly gate, that same carrier
+        # species (e.g. electrons, for an n+ poly) is the gate's own
+        # MAJORITY carrier, and it must stay free to respond to the VG
+        # perturbation - freezing it everywhere (as if the gate were an
+        # ideal metal with no carriers to freeze in the first place) pins
+        # the whole poly and collapses C_hf to ~0 regardless of doping.
         n_frozen = p_frozen = None
         if is_p_sub:
-            n_frozen = lf["n"].copy()
+            n_frozen = np.where(x >= 0.0, lf["n"], np.nan)
         else:
-            p_frozen = lf["p"].copy()
+            p_frozen = np.where(x >= 0.0, lf["p"], np.nan)
 
         hf_pert = solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat, dev, Cdop_substrate,
                                          VG + dV_hf, psi_bulk, psi_init=lf["psi"],
-                                         n_frozen=n_frozen, p_frozen=p_frozen)
-        Qs_hf_pert = semiconductor_charge(x, hf_pert["psi"], dev, oxide_index)
+                                         n_frozen=n_frozen, p_frozen=p_frozen, Cdop_gate=Cdop_gate)
+        Qs_hf_pert = semiconductor_charge(x, hf_pert["psi"], dev, oxide_index, gate_oxide_index)
         # C = dQ_gate/dVG = -dQ_semiconductor/dVG (charge neutrality of the
         # two-terminal capacitor: gate charge is the negative of the
         # semiconductor charge, and it's the gate charge that increases

@@ -42,8 +42,24 @@ class MOSDevice:
                               # equilibrium Fermi level at V_G=0). Pass a value (e.g. one
                               # of the GATE_WORKFUNCTION_* constants above) for a realistic,
                               # generally nonzero V_FB - see mos_analytic.flatband_voltage.
+                              # Ignored when gate_kind="poly" (the poly gate's own doping
+                              # determines its work function self-consistently instead).
     eps_ox_r: float = EPS_OX_R
     substrate_profile: DopingProfile = None  # None -> flat at Na (see mesh.build_mos_grid)
+
+    # --- Polysilicon (real, depletable) gate, instead of an ideal metal ---
+    gate_kind: str = "metal"       # "metal" (ideal Dirichlet contact right at the oxide,
+                                    # the original behavior) or "poly" (a genuine doped
+                                    # semiconductor region between the outer metal contact
+                                    # and the oxide, which can itself deplete near the
+                                    # oxide interface at low enough doping - see mesh.py's
+                                    # build_mos_grid and mos_solver.py's BC for gate_kind).
+    gate_profile: DopingProfile = None  # poly gate doping profile (None -> flat at
+                                    # abs(Cdop_gate) - see mos_config.py). Unused for
+                                    # gate_kind="metal".
+    t_gate: float = None            # poly gate thickness, cm (None -> auto-size from the
+                                    # gate's own Debye length, same convention as t_si).
+                                    # Unused for gate_kind="metal".
 
     @property
     def eps_ox(self) -> float:

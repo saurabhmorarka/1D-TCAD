@@ -1,0 +1,77 @@
+# MOS capacitor C-V simulation input parameters - REAL (depletable)
+# POLYSILICON GATE variant of input_mos.yaml.
+#
+# Run with: python3 mos_main.py input_mos_poly.yaml
+# (input_mos.yaml itself is untouched - the ideal-metal-gate example still
+# runs with plain `python3 mos_main.py`.)
+#
+# Where input_mos.yaml puts an ideal metal contact directly on the oxide,
+# this file puts a REAL, doped-silicon poly gate between the outer metal
+# contact and the oxide (see gate.type: poly below). A poly gate is not an
+# ideal conductor: at low enough doping it can develop its own depletion
+# layer right at the oxide interface, exactly like the substrate does on
+# the other side of the oxide - this is the real "polysilicon depletion
+# effect" that shows up in actual CMOS gate stacks (and is one of the
+# reasons modern processes moved to metal gates). At very high doping
+# (~1e20 cm^-3) the poly's own Debye length becomes so short that it
+# behaves almost exactly like an ideal metal, since the little band-bending
+# needed to supply the interface charge is confined to a sliver of Debye
+# lengths - a fraction of a nm - invisible on this device's scale.
+#
+# Try both gate.doping.concentration_cm3 values below (edit and re-run) to
+# see the contrast directly:
+#   5.0e18  (default) - clearly below the effective density of states,
+#            should show a visible poly depletion layer and a measurable
+#            dent in the C-V curve (compare the "real poly, can deplete"
+#            numeric curve against the "ideal, non-depleting poly" analytic
+#            reference curve on the same plot).
+#   1.0e20  - near-metal poly; the two curves should nearly coincide.
+
+substrate:
+  polarity: p        # "p" or "n" - which carrier is majority in the substrate
+  doping:
+    type: flat
+    concentration_cm3: 1.0e16
+
+oxide:
+  thickness_nm: 1.0
+  eps_r: 3.9
+
+gate:
+  type: poly          # "metal" (see input_mos.yaml) or "poly" (this file)
+
+  # Poly gate polarity - independent of the substrate polarity above (an
+  # n-substrate with a p+ poly gate works exactly the same way as the
+  # p-substrate/n+-poly case below; the physics only cares about each
+  # region's own doping, not how it relates to its neighbor's).
+  polarity: n
+
+  doping:
+    type: flat
+    concentration_cm3: 5.0e18   # <-- the knob to tweak: try 1.0e20 for the
+                                  # "near-metal" comparison case (see header).
+
+  # Poly gate thickness, nm. Omit (or comment out) to auto-size from the
+  # poly's own Debye length (same convention as the substrate's t_si) - a
+  # generous default that's always enough to contain the depletion layer
+  # with plenty of bulk poly left over, whatever the doping.
+  # thickness_nm: 200.0
+
+mesh:
+  n_ox_points: 15
+  growth: 1.08
+  bulk_spacing_debye_factor: 5.0
+  interface_spacing_debye_factor: 0.001
+
+voltage_sweep:
+  start_V: -2.0
+  stop_V: 1.0
+  points: 121
+
+output:
+  save_bias_points: [-0.4, 0.0, 0.3, 0.6, 0.9]
+
+  # Distinct filename from input_mos.yaml's mos_structure.json, so both
+  # examples' structure files can coexist in out/ and both be opened with
+  # plot.py --interactive independently.
+  structure_file: mos_poly_structure.json
