@@ -5,6 +5,11 @@ Python/NumPy/SciPy: a p-n junction diode (drift-diffusion, I-V) and a MOS
 capacitor (equilibrium Poisson, C-V). They share the same core Poisson/
 Scharfetter-Gummel machinery (`physics.py`).
 
+<p align="center">
+  <img src="out/03_iv_curve.png" alt="Diode I-V curve" width="49%">
+  <img src="out/01_cv_curve.png" alt="MOS capacitor C-V curve" width="49%">
+</p>
+
 ## Diode (`main.py`, `input_diode.yaml`)
 
 - Builds a nonuniform 1D mesh across a step p-n junction (sub-nm spacing at
@@ -51,7 +56,9 @@ python3 main.py
 - The extracted ideality factor rises toward n≈1.85 near the recombination
   peak (SRH recombination in the depletion region dominates at low forward
   bias) and relaxes toward n≈1 at higher forward bias (bulk diffusion
-  current dominates) — the textbook two-regime diode I-V curve.
+  current dominates) — the textbook two-regime diode I-V curve:
+
+  ![Diode I-V curve](out/03_iv_curve.png)
 - Reverse leakage current is orders of magnitude above the ideal Shockley
   I0, correctly reflecting depletion-region generation current that the
   simple long-base ideal-diode formula does not model.
@@ -109,8 +116,9 @@ python3 mos_main.py
   (C→C_ox), depletion (matches the analytic depletion approximation
   closely), and the classic **low-frequency/high-frequency split** in
   inversion (low-freq rises back toward C_ox as the inversion layer forms
-  and can respond; high-freq stays pinned near C_min since it can't) - see
-  `out/01_cv_curve.png`.
+  and can respond; high-freq stays pinned near C_min since it can't):
+
+  ![MOS capacitor C-V curve](out/01_cv_curve.png)
 - In accumulation, the numeric result converges (confirmed via a mesh
   refinement study) to ~0.84 x C_ox rather than the idealized analytic
   C_ox - a real, finite accumulation-layer screening-length effect the
