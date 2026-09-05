@@ -751,3 +751,14 @@ was otherwise ambiguous with the same key already meaning "p or n" one
 level up). `config.py`/`mos_config.py` both now return an extra
 `mesh_opts` dict, unpacked with `**mesh_opts` at the `build_diode_grid`/
 `build_mos_grid` call site in `main.py`/`mos_main.py`.
+
+## 11. Session 5: embedding result plots in the README
+
+Purely cosmetic, no code changes: the README rendered on GitHub as plain
+text with no visuals, even though it already pointed readers at
+`out/03_iv_curve.png` and `out/01_cv_curve.png` by filename in the results
+prose. Added a side-by-side preview of both plots near the top of the
+README (diode I-V, MOS-cap C-V) and turned the two existing filename
+mentions into actual embedded `![...](...)` images inline in their
+respective results sections, so the two headline results are visible
+without cloning the repo.
