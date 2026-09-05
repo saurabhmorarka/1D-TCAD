@@ -22,7 +22,7 @@ def load_config(path: str = DEFAULT_PATH) -> dict:
 
 
 def build_from_config(cfg: dict):
-    """Returns (Material, Device, Va_array, math_model, save_bias_points, mesh_opts)."""
+    """Returns (Material, Device, Va_array, math_model, save_bias_points, mesh_opts, structure_file)."""
     mat = Material()
     dev = Device()
 
@@ -68,6 +68,8 @@ def build_from_config(cfg: dict):
     if math_model not in ("gummel", "newton"):
         raise ValueError(f"solver.math_model must be 'gummel' or 'newton', got {math_model!r}")
 
-    save_bias_points = cfg.get("output", {}).get("save_bias_points", "last")
+    output_cfg = cfg.get("output", {})
+    save_bias_points = output_cfg.get("save_bias_points", "last")
+    structure_file = output_cfg.get("structure_file", "diode_structure.json")
 
-    return mat, dev, Va_list, math_model, save_bias_points, mesh_opts
+    return mat, dev, Va_list, math_model, save_bias_points, mesh_opts, structure_file

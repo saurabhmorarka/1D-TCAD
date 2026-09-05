@@ -48,16 +48,20 @@ def _sig_list(arr, ndigits=6):
     return [_sig(v, ndigits) for v in np.asarray(arr, dtype=float).tolist()]
 
 
-def save_structure(path, *, device, material, regions, x_um, doping_cm3, bias_points, dim=1):
-    """Write the structure+fields JSON. See the module docstring for the
-    schema; `bias_points` items are {"label", "bias", "fields": {...}} with
-    an optional "regime" key, and `regions` items are {"name",
-    "x_range_um", "kind", "doping_type"}."""
+def build_structure(*, device, material, regions, x_um, doping_cm3, bias_points, dim=1):
+    """Build the structure+fields doc (pure, no I/O) - see the module
+    docstring for the schema. `bias_points` items are {"label", "bias",
+    "fields": {...}} with an optional "regime" key, and `regions` items are
+    {"name", "x_range_um", "kind", "doping_type"}. Callers that always want
+    the doc for plotting, whether or not it also gets written to disk
+    (e.g. because the *_structure.json is disabled via input_*.yaml's
+    output.structure_file), should call this directly and pass the result
+    to write_structure() themselves when they do want it saved."""
     material_out = {}
     for k, v in material.items():
         material_out[k] = _sig_list(v, 8) if np.ndim(v) > 0 else _sig(v, 8)
 
-    doc = {
+    return {
         "schema_version": SCHEMA_VERSION,
         "dim": dim,
         "device": device,
@@ -75,8 +79,18 @@ def save_structure(path, *, device, material, regions, x_um, doping_cm3, bias_po
             for bp in bias_points
         ],
     }
+
+
+def write_structure(path, doc):
+    """Write an already-built doc (see build_structure()) to `path` as JSON."""
     with open(path, "w") as f:
         json.dump(doc, f, indent=1)
+
+
+def save_structure(path, **kwargs):
+    """Convenience: build_structure(**kwargs) then write_structure(path, doc)."""
+    doc = build_structure(**kwargs)
+    write_structure(path, doc)
     return doc
 
 

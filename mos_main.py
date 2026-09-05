@@ -41,7 +41,7 @@ C_GRID = "#c9c9c9"
 
 def main():
     input_cfg = cfg.load_config()
-    mat, dev, Cdop_substrate, VG_list, save_bias_points, mesh_opts = cfg.build_from_config(input_cfg)
+    mat, dev, Cdop_substrate, VG_list, save_bias_points, mesh_opts, structure_file = cfg.build_from_config(input_cfg)
     is_p_sub = Cdop_substrate < 0
     print(f"Loaded input_mos.yaml (substrate={'p' if is_p_sub else 'n'}-type, "
           f"|Nsub|={abs(Cdop_substrate):.2e} cm^-3, t_ox={dev.t_ox*1e7:.2f} nm)" if input_cfg
@@ -215,8 +215,7 @@ def main():
     chi_per_node = np.where(is_oxide, mparams.CHI_OX_EV, mat.chi_eV)
     Eg_per_node = np.where(is_oxide, mparams.EG_OX_EV, mat.Eg_eV)
 
-    struct_doc = sio.save_structure(
-        os.path.join(OUT, "mos_structure.json"),
+    struct_doc = sio.build_structure(
         device="mos",
         material={"eps_r": mat.eps_r, "ni_cm3": mat.ni, "T": mat.T,
                   "chi_eV": chi_per_node, "Eg_eV": Eg_per_node},
@@ -229,6 +228,8 @@ def main():
         ],
         x_um=x_um, doping_cm3=Cdop, bias_points=struct_bias_points,
     )
+    if structure_file:
+        sio.write_structure(os.path.join(OUT, structure_file), struct_doc)
 
     band_charge_xlim = (-dev.t_ox * 1e4 * 3, zoom_um)
     fig, axes = plt.subplots(1, 2, figsize=(14, 2.8))
@@ -275,7 +276,8 @@ def main():
     print("  07_charge_density.png")
     print("  cv_sweep.csv")
     print("  mos_fields_by_bias.csv")
-    print("  mos_structure.json  (standalone: python3 plot.py out/mos_structure.json)")
+    if structure_file:
+        print(f"  {structure_file}  (standalone: python3 plot.py out/{structure_file})")
 
 
 if __name__ == "__main__":

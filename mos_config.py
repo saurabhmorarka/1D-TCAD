@@ -20,7 +20,7 @@ def load_config(path: str = DEFAULT_PATH) -> dict:
 
 
 def build_from_config(cfg: dict):
-    """Returns (Material, MOSDevice, Cdop_substrate, VG_array, save_bias_points, mesh_opts)."""
+    """Returns (Material, MOSDevice, Cdop_substrate, VG_array, save_bias_points, mesh_opts, structure_file)."""
     mat = Material()
     dev = MOSDevice()
 
@@ -52,6 +52,8 @@ def build_from_config(cfg: dict):
     vs = cfg.get("voltage_sweep", {})
     VG_list = np.linspace(vs.get("start_V", -0.5), vs.get("stop_V", 1.0), int(vs.get("points", 61)))
 
-    save_bias_points = cfg.get("output", {}).get("save_bias_points", "last")
+    output_cfg = cfg.get("output", {})
+    save_bias_points = output_cfg.get("save_bias_points", "last")
+    structure_file = output_cfg.get("structure_file", "mos_structure.json")
 
-    return mat, dev, Cdop_substrate, VG_list, save_bias_points, mesh_opts
+    return mat, dev, Cdop_substrate, VG_list, save_bias_points, mesh_opts, structure_file

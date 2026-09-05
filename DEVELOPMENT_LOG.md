@@ -858,3 +858,51 @@ one on the substrate depletion region (mirroring the pattern the original
 MOS-cap psi(x) plot from Session 3 already used for the same reason). The
 diode's single band/charge diagram doesn't need this split since its
 p-side/n-side/junction are all comparable (um) scales.
+
+### 12.4 Two follow-up gaps: output naming belongs in the YAML, and a way to explore one saved file
+
+Feedback on the first pass of this feature raised two things:
+
+1. The structure JSON's filename (`diode_structure.json`/`mos_structure.json`)
+   was hardcoded in `main.py`/`mos_main.py`, breaking this project's
+   consistent rule that simulation *parameters* (including what gets
+   written where) live in `input_diode.yaml`/`input_mos.yaml`, not in the
+   driver scripts. Fixed by adding `output.structure_file` to both YAML
+   files (default the same names as before; `null`/`~` skips writing the
+   JSON entirely) and threading it through `config.py`/`mos_config.py`'s
+   `build_from_config()` return tuple. `structure_io.py` was split into a
+   pure `build_structure()` (no I/O) and `write_structure()`, so the
+   drivers can still build the in-memory doc for the band/charge/structure
+   plots even when the JSON write itself is disabled.
+2. Someone holding only a `*_structure.json` file (no access to the
+   original run) had no way to control what a plot showed - `plot.py`
+   could only make one fixed version of each diagram. Added `--band-fields`
+   /`--charge-fields` (comma-separated subsets of `BAND_FIELDS`/
+   `CHARGE_FIELDS`, e.g. `--band-fields Ec,Ev,Ef` to drop E_vacuum/E_i) to
+   the existing static-PNG path, plus a new `--interactive` mode that opens
+   a live matplotlib window with a checkbox per curve already drawn on the
+   axes (`matplotlib.widgets.CheckButtons`, toggling each line's
+   visibility on click rather than re-plotting). `--interactive` requires
+   picking exactly one `--which` plot, since the checkboxes are keyed to
+   whatever's on one shared axes object.
+
+   Wiring the backend was the one non-obvious part: `plot.py` had
+   unconditionally called `matplotlib.use("Agg")` at import time (needed
+   for headless use as a library from `main.py`/`mos_main.py`, which
+   already select Agg themselves before importing `plot`), but a live
+   checkbox window needs a real GUI backend, and matplotlib's backend must
+   be chosen before `matplotlib.pyplot` is ever imported - i.e. before
+   argparse has even run. Resolved with a raw `"--interactive" in sys.argv`
+   check ahead of the `matplotlib.use()` call, before any argument
+   parsing; when `plot.py` is imported as a library instead of run as the
+   `__main__` script, `sys.argv` belongs to the importing process and
+   won't contain that flag, so the Agg path is untouched for driver use.
+
+   Flagged for future attention: this interactive viewer will need
+   substantial rework once the project extends to 2D/3D (slice-plane
+   selection, blanking individual fields, a mesh/grid-overlay toggle, and
+   similar controls that only matter once there's more than one spatial
+   dimension to navigate) - `plot_bands`/`plot_charge`/`plot_structure`
+   already dispatch on `doc["dim"]` for exactly this reason, but the
+   `--interactive` CLI mechanism itself (one shared axes, one checkbox per
+   line) is a 1D-only starting point, not a finished design.

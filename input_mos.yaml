@@ -50,3 +50,8 @@ output:
   # profiles for - same convention as the diode's input_diode.yaml
   # (list of voltages, "all", or "last").
   save_bias_points: [-0.4, 0.0, 0.3, 0.6, 0.9]
+
+  # Filename (written into out/) for the structure+fields JSON that plot.py
+  # reads - same convention as the diode's input_diode.yaml. Set to
+  # null/~ to skip writing it.
+  structure_file: mos_structure.json

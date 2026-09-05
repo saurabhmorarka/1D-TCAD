@@ -65,3 +65,10 @@ output:
   #            very fine/long sweep would make a large CSV)
   #   "last" - save only the last (most forward) swept point
   save_bias_points: [0.0, 0.3, 0.5, 0.7, 1.0]
+
+  # Filename (written into out/) for the structure+fields JSON that plot.py
+  # reads (device geometry, mesh, doping, and the fields at the
+  # save_bias_points above - see structure_io.py). Set to null/~ to skip
+  # writing it (the structure/band/charge plots are still generated either
+  # way, just not persisted standalone).
+  structure_file: diode_structure.json

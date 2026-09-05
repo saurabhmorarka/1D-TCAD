@@ -14,15 +14,25 @@ someone else): `python3 plot.py out/diode_structure.json`
 """
 import argparse
 import os
+import sys
 
 import matplotlib
-matplotlib.use("Agg")
+# Library use (imported by main.py/mos_main.py, which already picked a
+# backend before importing this module) is unaffected either way; this
+# only matters for standalone CLI use, where `--interactive` needs a real
+# GUI backend instead of the headless one everything else here uses -
+# and the backend must be chosen before matplotlib.pyplot is ever
+# imported, i.e. before argparse has even run, hence the raw sys.argv check.
+if "--interactive" not in sys.argv:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
 import structure_io as sio
 
 C_GRID = "#c9c9c9"
+BAND_FIELDS = ["Evac", "Ec", "Ev", "Ei", "Ef"]
+CHARGE_FIELDS = ["fixed", "mobile", "net"]
 REGION_COLORS = {
     ("semiconductor", "p"): "#f4a259",
     ("semiconductor", "n"): "#5fa8d3",
@@ -122,14 +132,18 @@ def _band_energies(doc, bias_point):
     return Ec, Ev, Ei, Evac, Efn, Efp
 
 
-def plot_bands(doc, bias_index=0, ax=None, xlim_um=None):
+def plot_bands(doc, bias_index=0, ax=None, xlim_um=None, fields=None):
     """Textbook band diagram: E_c, E_v, E_i, vacuum level, and the electron/
     hole quasi-Fermi levels (drawn as a single flat E_f when the structure
     is in true equilibrium, i.e. phin=phip=0 everywhere). E_i is the
     midgap approximation (Ec+Ev)/2, not the exact Nc/Nv-weighted intrinsic
     level - fine for a teaching plot, not for precision analytic
-    comparison (see analytic.py/mos_analytic.py for that)."""
+    comparison (see analytic.py/mos_analytic.py for that).
+
+    `fields`: subset of BAND_FIELDS ("Evac","Ec","Ev","Ei","Ef") to draw;
+    None (default) draws all of them."""
     _require_1d(doc, "plot_bands")
+    fields = set(BAND_FIELDS) if fields is None else set(fields)
     bp = doc["bias_points"][bias_index]
     Ec, Ev, Ei, Evac, Efn, Efp = _band_energies(doc, bp)
     x_um = np.array(doc["grid"]["x_um"])
@@ -137,15 +151,20 @@ def plot_bands(doc, bias_index=0, ax=None, xlim_um=None):
     if own_fig:
         fig, ax = plt.subplots(figsize=(8, 5.5))
 
-    ax.plot(x_um, Evac, color="#999999", lw=1.2, ls=":", label="E_vacuum")
-    ax.plot(x_um, Ec, color="#1f6feb", lw=2, label="E_c")
-    ax.plot(x_um, Ev, color="#c2410c", lw=2, label="E_v")
-    ax.plot(x_um, Ei, color="#888888", lw=1.2, ls="--", label="E_i (midgap approx.)")
-    if np.allclose(Efn, Efp):
-        ax.plot(x_um, Efn, color="#1a7f37", lw=1.8, label="E_f")
-    else:
-        ax.plot(x_um, Efn, color="#1a7f37", lw=1.8, label="E_fn (electron quasi-Fermi)")
-        ax.plot(x_um, Efp, color="#9a6700", lw=1.8, ls="--", label="E_fp (hole quasi-Fermi)")
+    if "Evac" in fields:
+        ax.plot(x_um, Evac, color="#999999", lw=1.2, ls=":", label="E_vacuum")
+    if "Ec" in fields:
+        ax.plot(x_um, Ec, color="#1f6feb", lw=2, label="E_c")
+    if "Ev" in fields:
+        ax.plot(x_um, Ev, color="#c2410c", lw=2, label="E_v")
+    if "Ei" in fields:
+        ax.plot(x_um, Ei, color="#888888", lw=1.2, ls="--", label="E_i (midgap approx.)")
+    if "Ef" in fields:
+        if np.allclose(Efn, Efp):
+            ax.plot(x_um, Efn, color="#1a7f37", lw=1.8, label="E_f")
+        else:
+            ax.plot(x_um, Efn, color="#1a7f37", lw=1.8, label="E_fn (electron quasi-Fermi)")
+            ax.plot(x_um, Efp, color="#9a6700", lw=1.8, ls="--", label="E_fp (hole quasi-Fermi)")
 
     if xlim_um is not None:
         ax.set_xlim(*xlim_um)
@@ -160,12 +179,16 @@ def plot_bands(doc, bias_index=0, ax=None, xlim_um=None):
     return ax
 
 
-def plot_charge(doc, bias_index=0, ax=None, xlim_um=None):
+def plot_charge(doc, bias_index=0, ax=None, xlim_um=None, fields=None):
     """Charge-density decomposition: fixed (ionized dopant) charge vs.
     mobile carrier charge vs. their sum (net charge), all in units of
     elementary charges/cm^3 (not multiplied by q) so they're directly
-    comparable to the doping numbers used elsewhere in this project."""
+    comparable to the doping numbers used elsewhere in this project.
+
+    `fields`: subset of CHARGE_FIELDS ("fixed","mobile","net") to draw;
+    None (default) draws all of them."""
     _require_1d(doc, "plot_charge")
+    fields = set(CHARGE_FIELDS) if fields is None else set(fields)
     bp = doc["bias_points"][bias_index]
     x_um = np.array(doc["grid"]["x_um"])
     Cdop = np.array(doc["doping_cm3"])
@@ -185,9 +208,12 @@ def plot_charge(doc, bias_index=0, ax=None, xlim_um=None):
                 bbox=dict(boxstyle="round", fc="#f0f0f0", ec="none"))
 
     ax.axhline(0, color="#333333", lw=0.8)
-    ax.plot(x_um, Cdop, color="#6a4c93", lw=1.8, ls="--", label="Fixed (ionized dopant) charge, N_D-N_A")
-    ax.plot(x_um, mobile, color="#1f6feb", lw=1.8, label="Mobile carrier charge, p-n")
-    ax.plot(x_um, net, color="#c2410c", lw=2.2, label="Net charge, (N_D-N_A)+(p-n)")
+    if "fixed" in fields:
+        ax.plot(x_um, Cdop, color="#6a4c93", lw=1.8, ls="--", label="Fixed (ionized dopant) charge, N_D-N_A")
+    if "mobile" in fields:
+        ax.plot(x_um, mobile, color="#1f6feb", lw=1.8, label="Mobile carrier charge, p-n")
+    if "net" in fields:
+        ax.plot(x_um, net, color="#c2410c", lw=2.2, label="Net charge, (N_D-N_A)+(p-n)")
 
     if xlim_um is not None:
         ax.set_xlim(*xlim_um)
@@ -205,6 +231,30 @@ def plot_charge(doc, bias_index=0, ax=None, xlim_um=None):
 PLOTTERS = {"structure": plot_structure, "bands": plot_bands, "charge": plot_charge}
 
 
+def _interactive_show(ax):
+    """Open a live matplotlib window with a checkbox per curve already
+    drawn on `ax`, toggling that curve's visibility on click. Only makes
+    sense with a real (non-Agg) backend, i.e. --interactive on the CLI
+    below, which picks the backend before pyplot is ever imported."""
+    from matplotlib.widgets import CheckButtons
+
+    fig = ax.figure
+    lines = [l for l in ax.get_lines() if l.get_label() and not l.get_label().startswith("_")]
+    if lines:
+        labels = [l.get_label() for l in lines]
+        fig.subplots_adjust(right=0.78)
+        check_ax = fig.add_axes([0.80, 0.35, 0.18, 0.3])
+        check = CheckButtons(check_ax, labels, [l.get_visible() for l in lines])
+
+        def toggle(label):
+            line = lines[labels.index(label)]
+            line.set_visible(not line.get_visible())
+            fig.canvas.draw_idle()
+
+        check.on_clicked(toggle)
+    plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Standalone plotter for tcad1d structure+fields JSON files "
@@ -216,21 +266,49 @@ def main():
     parser.add_argument("--bias-index", type=int, default=0,
                          help="Index into bias_points for the bands/charge plots (default: 0, "
                               "the first saved bias point)")
+    parser.add_argument("--band-fields", default=None,
+                         help=f"Comma-separated subset of {BAND_FIELDS} to draw on the band "
+                              "diagram (default: all)")
+    parser.add_argument("--charge-fields", default=None,
+                         help=f"Comma-separated subset of {CHARGE_FIELDS} to draw on the "
+                              "charge-density plot (default: all)")
     parser.add_argument("--out-dir", default=None,
                          help="Directory to write PNGs into (default: alongside the structure file)")
+    parser.add_argument("--interactive", action="store_true",
+                         help="Open a live window with checkboxes to toggle curves on/off, "
+                              "instead of saving a PNG. Requires a local display, and exactly "
+                              "one --which plot.")
     args = parser.parse_args()
 
     doc = sio.load_structure(args.structure_path)
+    which = [n.strip() for n in args.which.split(",") if n.strip()]
+    for name in which:
+        if name not in PLOTTERS:
+            raise SystemExit(f"Unknown plot name {name!r}; choose from {sorted(PLOTTERS)}")
+    if args.interactive and len(which) != 1:
+        raise SystemExit("--interactive needs exactly one --which plot (structure, bands, or charge)")
+
+    band_fields = args.band_fields.split(",") if args.band_fields else None
+    charge_fields = args.charge_fields.split(",") if args.charge_fields else None
+
     out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.structure_path)) or "."
     os.makedirs(out_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(args.structure_path))[0]
 
-    for name in (n.strip() for n in args.which.split(",") if n.strip()):
-        if name not in PLOTTERS:
-            raise SystemExit(f"Unknown plot name {name!r}; choose from {sorted(PLOTTERS)}")
-        ax = PLOTTERS[name](doc) if name == "structure" else PLOTTERS[name](doc, bias_index=args.bias_index)
+    for name in which:
+        kwargs = {} if name == "structure" else {"bias_index": args.bias_index}
+        if name == "bands" and band_fields:
+            kwargs["fields"] = band_fields
+        if name == "charge" and charge_fields:
+            kwargs["fields"] = charge_fields
+        ax = PLOTTERS[name](doc, **kwargs)
         fig = ax.figure
         fig.tight_layout()
+
+        if args.interactive:
+            _interactive_show(ax)
+            continue
+
         out_path = os.path.join(out_dir, f"{stem}_{name}.png")
         fig.savefig(out_path, dpi=150)
         plt.close(fig)

@@ -39,7 +39,7 @@ C_GRID = "#c9c9c9"
 
 def main():
     input_cfg = cfg.load_config()
-    mat, dev, Va_list, math_model, save_bias_points, mesh_opts = cfg.build_from_config(input_cfg)
+    mat, dev, Va_list, math_model, save_bias_points, mesh_opts, structure_file = cfg.build_from_config(input_cfg)
     print(f"Loaded input_diode.yaml (solver.math_model={math_model!r})" if input_cfg
           else "No input_diode.yaml found - using params.py defaults")
 
@@ -208,8 +208,7 @@ def main():
             "fields": {"psi": r["psi"], "n": r["n"], "p": r["p"], "phin": r["phin"], "phip": r["phip"]},
         })
 
-    struct_doc = sio.save_structure(
-        os.path.join(OUT, "diode_structure.json"),
+    struct_doc = sio.build_structure(
         device="diode",
         material={"eps_r": mat.eps_r, "ni_cm3": mat.ni, "T": mat.T,
                   "chi_eV": mat.chi_eV, "Eg_eV": mat.Eg_eV},
@@ -221,6 +220,8 @@ def main():
         ],
         x_um=x_um, doping_cm3=Cdop, bias_points=struct_bias_points,
     )
+    if structure_file:
+        sio.write_structure(os.path.join(OUT, structure_file), struct_doc)
 
     band_charge_xlim = (-zoom_half_width_um, zoom_half_width_um)
     fig = tplot.plot_structure(struct_doc).figure
@@ -317,7 +318,8 @@ def main():
     print("  fields_by_bias.csv")
     print("  iv_sweep.csv")
     print("  solver_benchmark.csv")
-    print("  diode_structure.json  (standalone: python3 plot.py out/diode_structure.json)")
+    if structure_file:
+        print(f"  {structure_file}  (standalone: python3 plot.py out/{structure_file})")
 
 
 if __name__ == "__main__":
