@@ -644,3 +644,110 @@ is too small (millivolts) to see, `mos_main.py` instead generates a
 dedicated, clearly-labeled illustrative plot using a deliberately larger
 (0.2 V) frozen-carrier perturbation, so the quasi-Fermi splitting the
 high-frequency assumption depends on is actually visible.
+
+## 10. Session 4: renaming the repo, and a common, more flexible input format
+
+### 10.1 Repo rename
+
+The GitHub repo (and its README title) had already outgrown the name
+`1D-diode` once the MOS capacitor was added, so it was renamed to
+`1D-TCAD` via `gh repo rename` (GitHub keeps the old URL as a redirect;
+`git remote -v` confirmed the local `origin` URL updated automatically,
+no local reconfiguration needed).
+
+### 10.2 The ask: a common, more flexible input format
+
+Make both input files cover the permutations a student would actually want
+to try - not just a fixed doping value per side, but a
+device *structure* (thickness, mesh) and a doping *shape* (flat, linear-
+graded, or gaussian/implant-like), with the two tools' input files sharing
+a common schema wherever they share a concept, and the mesh generator
+(`mesh.py`) unified into one shared module rather than a diode-only
+`mesh.py` plus a separate `mos_mesh.py`. Explicitly deferred: fully
+unifying the diode and MOS-cap into one structure-agnostic "device stack"
+description (a list of layers the tool doesn't need to know is a diode or
+a MOS-cap) - a good direction, but out of scope for this pass; each tool
+still has its own YAML file and its own two-argument mesh-builder entry
+point (`build_diode_grid`, `build_mos_grid`), the two of which now share
+one mesh *engine* underneath.
+
+Before writing anything, confirmed one scoping question with the user:
+whether a graded/gaussian doping profile should be allowed to blend across
+what used to be a hard layer boundary (e.g. an implant tailing from the
+substrate into the oxide) - the user chose to keep each profile confined
+to its own region, layers still meeting at a sharp interface. That
+decision simplified the implementation a lot: a profile is defined purely
+in a region's own local depth coordinate (0 at its reference edge -
+the junction, or the oxide/substrate interface - out to that region's own
+thickness), so the existing two-regions-meeting-at-x=0 mesh/geometry
+handling didn't need to change at all, only what's sampled *within* each
+region.
+
+### 10.3 New shared module: `doping_profiles.py`
+
+A single `DopingProfile` dataclass (`type: flat|linear|gaussian`, plus
+type-specific fields) used identically by a diode's p-side/n-side and a
+MOS capacitor's substrate. `.sample(depth, thickness)` returns the
+unsigned concentration at a given depth into the region; `.reference_
+concentration()` returns one representative number (exact for flat, an
+approximation - peak, or average - otherwise) for every closed-form
+formula in `analytic.py`/`mos_analytic.py`, none of which were touched:
+they still just consume a scalar Na/Nd/Cdop_substrate, computed from
+whichever profile was configured. This was the key design choice that
+kept the blast radius small - the physics/analytic layer is completely
+insulated from the new doping-profile machinery.
+
+### 10.4 Mesh unification: a real generalization, not just a file merge
+
+Diode and MOS-cap meshes have always been built the same way - grow the
+spacing geometrically outward from a hard interface (finest right at it,
+where the electrostatic potential bends sharply from depletion physics
+even when doping is perfectly flat) - so unifying them into one `mesh.py`
+was mostly mechanical: `mos_mesh.py` was deleted and its logic folded in
+as `build_mos_grid`, sharing a new `_region_nodes` helper with the diode's
+`build_diode_grid`.
+
+The part that needed genuine new logic: a graded/gaussian profile can
+demand a fine mesh somewhere in the *middle* of a region too (e.g. a
+gaussian implant peak away from the interface), which the old
+distance-from-interface-only geometric growth (`_one_sided_nodes`) can't
+see at all - it has no idea the doping is even changing. For a non-flat
+profile, `_region_nodes` now dispatches to a new adaptive marching
+algorithm (`_graded_nodes`) that at every step takes the tighter of two
+local spacing limits: the same geometric interface-distance ramp
+(recomputed with the LOCAL doping value at that point, not one number for
+the whole region) and a `|d(ln N)/dx|`-based limit that catches wherever
+the profile itself is changing quickly, regardless of where that falls.
+Flat doping keeps using the exact original `_one_sided_nodes` algorithm
+(dispatched on `profile.type == "flat"`), so every existing flat-doping
+result was verified bit-for-bit-equivalent after the refactor - both
+drivers were re-run end to end and reproduced the documented baselines
+exactly (Newton/Gummel 9.02x speedup on the diode sweep; 0.8375 accumulation
+C/Cox, V_T=0.7284 V on the MOS-cap sweep). The new adaptive path was
+smoke-tested separately with a gaussian n-side implant (5e18 cm^-3 peak,
+50 nm deep, 30 nm straggle): the mesh refines around the peak as expected,
+and a full equilibrium Poisson solve on it converges and satisfies charge
+neutrality to machine precision in the quasi-neutral bulk, with the
+expected deviation confined to the (wider than usual, given how lightly
+doped the gaussian's background tail is) depletion region. As with the
+MOS-cap accumulation-mesh finding in Session 3, this adaptive algorithm is
+a heuristic, not a proof of convergence - a new graded-doping case should
+still be checked by re-running with a tighter mesh and confirming the
+answer doesn't move, the same practice this project has followed
+throughout.
+
+### 10.5 Input file changes
+
+`input.yaml` was renamed `input_diode.yaml`. Both YAML files gained a
+parallel `doping:` schema (`type: flat|linear|gaussian` per region, with
+type-specific keys) and a `mesh:` section exposing every mesh-sizing knob
+that was previously hardcoded as a Python default argument
+(`growth`, `bulk_spacing_debye_factor`, `junction_spacing_debye_factor` /
+`interface_spacing_debye_factor`, `n_ox_points`). `input_mos.yaml` also
+gained `oxide.eps_r` (previously only settable in `mos_params.py`) and
+renamed its `substrate.type` key to `substrate.polarity`, freeing up
+`type` to mean the doping-profile shape consistently in both files (it
+was otherwise ambiguous with the same key already meaning "p or n" one
+level up). `config.py`/`mos_config.py` both now return an extra
+`mesh_opts` dict, unpacked with `**mesh_opts` at the `build_diode_grid`/
+`build_mos_grid` call site in `main.py`/`mos_main.py`.

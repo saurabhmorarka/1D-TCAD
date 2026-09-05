@@ -6,10 +6,10 @@ Scharfetter-Gummel drift-diffusion solver (Gummel iteration). Compares
 results against closed-form expressions: built-in potential, depletion
 approximation, and the Shockley ideal-diode law.
 
-Doping, mobility, lifetime, and voltage sweep range are read from
-input.yaml (see config.py) - edit that file rather than this one to change
-the simulation's parameters. Material()/Device() here are just the defaults
-input.yaml overrides.
+Doping, mobility, lifetime, mesh, and voltage sweep range are read from
+input_diode.yaml (see config.py) - edit that file rather than this one to
+change the simulation's parameters. Material()/Device() here are just the
+defaults input_diode.yaml overrides.
 """
 import csv
 import os
@@ -20,7 +20,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from mesh import build_grid
+from mesh import build_diode_grid
 from solver import solve_equilibrium, voltage_sweep
 import analytic as an
 import config as cfg
@@ -37,11 +37,11 @@ C_GRID = "#c9c9c9"
 
 def main():
     input_cfg = cfg.load_config()
-    mat, dev, Va_list, math_model, save_bias_points = cfg.build_from_config(input_cfg)
-    print(f"Loaded input.yaml (solver.math_model={math_model!r})" if input_cfg
-          else "No input.yaml found - using params.py defaults")
+    mat, dev, Va_list, math_model, save_bias_points, mesh_opts = cfg.build_from_config(input_cfg)
+    print(f"Loaded input_diode.yaml (solver.math_model={math_model!r})" if input_cfg
+          else "No input_diode.yaml found - using params.py defaults")
 
-    g = build_grid(mat, dev)
+    g = build_diode_grid(mat, dev, **mesh_opts)
     x, Cdop = g["x"], g["Cdop"]
     print(f"Grid: {len(x)} points, Wp={g['Wp']*1e4:.2f} um, Wn={g['Wn']*1e4:.2f} um, "
           f"h_min={g['h_min']*1e7:.2f} nm, h_max={g['h_max']*1e7:.2f} nm")
@@ -59,7 +59,7 @@ def main():
     print(f"  Depletion width (analytic, step-junction approx): xp={xp_an*1e4:.4f} um, "
           f"xn={xn_an*1e4:.4f} um, W={W_an*1e4:.4f} um")
 
-    # ---- Voltage sweep (solver chosen by input.yaml: solver.math_model) ----
+    # ---- Voltage sweep (solver chosen by input_diode.yaml: solver.math_model) ----
     print(f"\nRunning bias sweep ({math_model} drift-diffusion solve per point)...")
     _, _, _, results = voltage_sweep(x, Cdop, mat, dev, Va_list, verbose=False, method=math_model)
 
@@ -173,7 +173,7 @@ def main():
     plt.close(fig)
 
     # 5. Quasi-Fermi potentials (non-equilibrium) at a configurable set of bias points
-    # (input.yaml: output.save_bias_points - a list of Va values, "all", or "last")
+    # (input_diode.yaml: output.save_bias_points - a list of Va values, "all", or "last")
     save_idx = fsave.resolve_save_points(save_bias_points, Va_arr)
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(x_um, psi_eq, color=C_GRID, lw=1.2, ls=":", label="psi, equilibrium (V_a=0 reference)")

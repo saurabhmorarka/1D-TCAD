@@ -8,6 +8,7 @@ solve; see mos_solver.py's module docstring for why).
 from dataclasses import dataclass
 
 from params import EPS0
+from doping_profiles import DopingProfile
 
 
 EPS_OX_R = 3.9  # SiO2 relative permittivity
@@ -36,6 +37,7 @@ class MOSDevice:
                               # of the GATE_WORKFUNCTION_* constants above) for a realistic,
                               # generally nonzero V_FB - see mos_analytic.flatband_voltage.
     eps_ox_r: float = EPS_OX_R
+    substrate_profile: DopingProfile = None  # None -> flat at Na (see mesh.build_mos_grid)
 
     @property
     def eps_ox(self) -> float:

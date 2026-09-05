@@ -20,7 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import physics as ph
-from mos_mesh import build_mos_grid
+from mesh import build_mos_grid
 from mos_solver import cv_sweep, solve_mos_equilibrium
 import mos_analytic as man
 import mos_config as cfg
@@ -38,13 +38,13 @@ C_GRID = "#c9c9c9"
 
 def main():
     input_cfg = cfg.load_config()
-    mat, dev, Cdop_substrate, VG_list, save_bias_points = cfg.build_from_config(input_cfg)
+    mat, dev, Cdop_substrate, VG_list, save_bias_points, mesh_opts = cfg.build_from_config(input_cfg)
     is_p_sub = Cdop_substrate < 0
     print(f"Loaded input_mos.yaml (substrate={'p' if is_p_sub else 'n'}-type, "
           f"|Nsub|={abs(Cdop_substrate):.2e} cm^-3, t_ox={dev.t_ox*1e7:.2f} nm)" if input_cfg
           else "No input_mos.yaml found - using mos_params.py defaults")
 
-    g = build_mos_grid(mat, dev, Cdop_substrate)
+    g = build_mos_grid(mat, dev, Cdop_substrate, **mesh_opts)
     x, Cdop, eps_edge, ni_arr = g["x"], g["Cdop"], g["eps_edge"], g["ni_arr"]
     print(f"Grid: {len(x)} points, t_ox={dev.t_ox*1e7:.2f} nm ({g['is_oxide'].sum()} oxide points), "
           f"t_si={g['t_si']*1e4:.2f} um, h_min={g['h_min']*1e7:.3f} nm, h_max={g['h_max']*1e7:.2f} nm")

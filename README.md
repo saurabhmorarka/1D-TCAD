@@ -5,7 +5,7 @@ Python/NumPy/SciPy: a p-n junction diode (drift-diffusion, I-V) and a MOS
 capacitor (equilibrium Poisson, C-V). They share the same core Poisson/
 Scharfetter-Gummel machinery (`physics.py`).
 
-## Diode (`main.py`, `input.yaml`)
+## Diode (`main.py`, `input_diode.yaml`)
 
 - Builds a nonuniform 1D mesh across a step p-n junction (sub-nm spacing at
   the junction, geometrically coarsening into the bulk).
@@ -25,13 +25,17 @@ Scharfetter-Gummel machinery (`physics.py`).
   `Vbi = Vt*ln(Na*Nd/ni^2)`, the depletion approximation, and the Shockley
   long-base ideal diode law `I = I0*(exp(V/Vt)-1)`.
 - Plots the electron/hole quasi-Fermi potentials (phin, phip) at a
-  configurable set of bias points (`input.yaml`: `output.save_bias_points`),
+  configurable set of bias points (`input_diode.yaml`: `output.save_bias_points`),
   alongside a full-field CSV export for those points.
 
-All simulation parameters (doping, device thickness, voltage sweep range,
-which solver to use, which bias points to save full fields for) are read
-from `input.yaml`, not hardcoded - edit that file to change them. `params.py`
-just holds the defaults it overrides.
+All simulation parameters (doping, device thickness, mesh knobs, voltage
+sweep range, which solver to use, which bias points to save full fields
+for) are read from `input_diode.yaml`, not hardcoded - edit that file to
+change them. `params.py` just holds the defaults it overrides. Doping on
+either side can be `flat` (uniform), `linear` (graded), or `gaussian`
+(implant-like) - see the comments in `input_diode.yaml` for the schema; the
+mesh (`mesh.py`) automatically refines wherever a graded profile changes
+quickly, not just at the junction.
 
 ```bash
 python3 main.py
@@ -58,6 +62,14 @@ python3 main.py
   the sweep is pushed to 1.2V/high injection, where Gummel starts hitting
   its iteration cap without fully converging - see `DEVELOPMENT_LOG.md`).
 
+All simulation parameters for both tools are read from their `input_*.yaml`
+file, not hardcoded - `params.py`/`mos_params.py` just hold the defaults
+those files override. The two YAML files use a deliberately parallel
+schema (`doping`, `mesh`, `voltage_sweep`, `output` sections) even though
+the tools don't yet share a single "device stack" description - see
+`mesh.py`'s module docstring for what they do share (the mesh engine
+itself and the doping-profile machinery in `doping_profiles.py`).
+
 ## MOS capacitor (`mos_main.py`, `input_mos.yaml`)
 
 - Builds a mesh across a metal gate - thin oxide - uniform substrate stack
@@ -82,6 +94,10 @@ python3 main.py
   `input_mos.yaml`: `gate.workfunction_eV`, or `null` for the ideal
   phi_ms=0 assumption), threshold voltage, and analytic low-/high-frequency
   C-V curves.
+- Oxide thickness, oxide permittivity, substrate doping (`flat`/`linear`/
+  `gaussian` - e.g. a shallow threshold-adjust implant right under the
+  gate), and every mesh knob are all read from `input_mos.yaml`, not
+  hardcoded.
 
 ```bash
 python3 mos_main.py
@@ -109,14 +125,14 @@ python3 mos_main.py
 
 | File | Purpose |
 |---|---|
-| `input.yaml` | **Edit this** for the diode: doping, thickness, voltage sweep, solver (`math_model: gummel` \| `newton`), which bias points to save fields for |
-| `config.py` | Loads `input.yaml` into `Material`/`Device`/voltage-sweep/solver-choice overrides |
-| `input_mos.yaml` | **Edit this** for the MOS capacitor: substrate type/doping, oxide thickness, gate work function, voltage sweep |
-| `mos_config.py` | Loads `input_mos.yaml` into `Material`/`MOSDevice`/voltage-sweep overrides |
+| `input_diode.yaml` | **Edit this** for the diode: doping (flat/linear/gaussian per side), thickness, mesh knobs, voltage sweep, solver (`math_model: gummel` \| `newton`), which bias points to save fields for |
+| `config.py` | Loads `input_diode.yaml` into `Material`/`Device`/voltage-sweep/solver-choice/mesh overrides |
+| `input_mos.yaml` | **Edit this** for the MOS capacitor: substrate polarity/doping (flat/linear/gaussian), oxide thickness/permittivity, gate work function, mesh knobs, voltage sweep |
+| `mos_config.py` | Loads `input_mos.yaml` into `Material`/`MOSDevice`/voltage-sweep/mesh overrides |
+| `doping_profiles.py` | Shared doping-profile shapes (flat/linear/gaussian) and their sampling/reference-concentration logic, used by both YAML files and both mesh builders |
 | `params.py` | Physical constants and diode material/device parameter defaults |
 | `mos_params.py` | MOS capacitor device parameters (oxide thickness, gate work function, SiO2 permittivity) |
-| `mesh.py` | Diode nonuniform grid generator |
-| `mos_mesh.py` | MOS capacitor oxide+substrate grid generator |
+| `mesh.py` | Shared mesh engine (`build_diode_grid`, `build_mos_grid`): geometric refinement at hard interfaces plus adaptive refinement wherever a graded doping profile changes quickly |
 | `physics.py` | Bernoulli function (+ its derivative), nonlinear Poisson (Newton, generalized to array eps/ni and frozen-carrier modes), Scharfetter-Gummel continuity solves |
 | `analytic.py` | Diode closed-form comparisons (Vbi, depletion width, Shockley law) |
 | `mos_analytic.py` | MOS-cap closed-form comparisons (flat-band/threshold voltage, analytic low-/high-freq C-V) |
@@ -124,7 +140,7 @@ python3 mos_main.py
 | `newton_solver.py` | Diode's fully coupled Newton solve: analytic sparse Jacobian, direct sparse solve, backtracking line search |
 | `mos_solver.py` | MOS-cap equilibrium C-V sweep (low-frequency) and frozen-carrier quasi-small-signal sweep (high-frequency) |
 | `field_save.py` | Shared helper: selecting which bias points to save full field profiles for, quasi-Fermi-potential plotting, field CSV export |
-| `main.py` | Diode driver: runs the sweep with both solvers (for the benchmark) plus the one from `input.yaml`, generates plots and CSVs in `out/` |
+| `main.py` | Diode driver: runs the sweep with both solvers (for the benchmark) plus the one from `input_diode.yaml`, generates plots and CSVs in `out/` |
 | `mos_main.py` | MOS-cap driver: runs the C-V sweep, generates plots and CSVs in `out/` |
 
 Requires `numpy`, `scipy`, `matplotlib`, `pyyaml`. Output plots and CSVs are

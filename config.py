@@ -1,5 +1,5 @@
-"""Loads input.yaml and builds Material/Device/voltage-sweep/solver-choice
-overrides from it. Every value in the input file overrides the
+"""Loads input_diode.yaml and builds Material/Device/voltage-sweep/solver-
+choice/mesh overrides from it. Every value in the input file overrides the
 corresponding default from params.py; the input file itself is optional
 (defaults are used for anything missing or if the file doesn't exist)."""
 import os
@@ -8,8 +8,9 @@ import numpy as np
 import yaml
 
 from params import Material, Device
+import doping_profiles as dp
 
-DEFAULT_PATH = os.path.join(os.path.dirname(__file__), "input.yaml")
+DEFAULT_PATH = os.path.join(os.path.dirname(__file__), "input_diode.yaml")
 
 
 def load_config(path: str = DEFAULT_PATH) -> dict:
@@ -21,21 +22,34 @@ def load_config(path: str = DEFAULT_PATH) -> dict:
 
 
 def build_from_config(cfg: dict):
-    """Returns (Material, Device, Va_array, math_model)."""
+    """Returns (Material, Device, Va_array, math_model, save_bias_points, mesh_opts)."""
     mat = Material()
     dev = Device()
 
-    doping = cfg.get("doping", {})
-    if "Na_cm3" in doping:
-        dev.Na = float(doping["Na_cm3"])
-    if "Nd_cm3" in doping:
-        dev.Nd = float(doping["Nd_cm3"])
+    doping = cfg.get("doping") or {}
+    dev.p_profile = dp.parse_doping_profile(doping.get("p_side") or {}, dev.Na)
+    dev.n_profile = dp.parse_doping_profile(doping.get("n_side") or {}, dev.Nd)
+    dev.Na = dev.p_profile.reference_concentration()
+    dev.Nd = dev.n_profile.reference_concentration()
 
-    thickness = cfg.get("thickness", {})
+    thickness = cfg.get("thickness") or {}
     if thickness.get("Wp_um") is not None:
         dev.Wp = float(thickness["Wp_um"]) * 1e-4
     if thickness.get("Wn_um") is not None:
         dev.Wn = float(thickness["Wn_um"]) * 1e-4
+
+    material = cfg.get("material") or {}
+    if material.get("eps_r") is not None:
+        mat.eps_r = float(material["eps_r"])
+    if material.get("ni_cm3") is not None:
+        mat.ni = float(material["ni_cm3"])
+
+    mesh_cfg = cfg.get("mesh") or {}
+    mesh_opts = dict(
+        growth=float(mesh_cfg.get("growth", 1.06)),
+        bulk_spacing_debye_factor=float(mesh_cfg.get("bulk_spacing_debye_factor", 5.0)),
+        junction_spacing_debye_factor=float(mesh_cfg.get("junction_spacing_debye_factor", 0.05)),
+    )
 
     vs = cfg.get("voltage_sweep", {})
     rev = np.linspace(
@@ -56,4 +70,4 @@ def build_from_config(cfg: dict):
 
     save_bias_points = cfg.get("output", {}).get("save_bias_points", "last")
 
-    return mat, dev, Va_list, math_model, save_bias_points
+    return mat, dev, Va_list, math_model, save_bias_points, mesh_opts

@@ -1,18 +1,39 @@
-# 1D Diode simulation input parameters.
+# 1D diode simulation input parameters.
 #
 # Every value here overrides the corresponding default in params.py. Delete
 # a key (or set it to null where supported) to fall back to the default.
 
 doping:
-  Na_cm3: 1.0e17     # p-side acceptor doping, cm^-3
-  Nd_cm3: 1.0e16     # n-side donor doping, cm^-3
+  p_side:
+    type: flat            # flat | linear | gaussian
+    concentration_cm3: 1.0e17
+    # linear:   start_cm3, end_cm3 (concentration at the junction and at the
+    #           far edge of the region, respectively)
+    # gaussian: peak_cm3, peak_depth_um (depth of the peak from the
+    #           junction, default 0), straggle_um, background_cm3 (default 0)
+  n_side:
+    type: flat
+    concentration_cm3: 1.0e16
 
 thickness:
   # p-side / n-side quasi-neutral region length, in micrometers.
   # Leave as null to auto-size each side to ~5x the minority-carrier
-  # diffusion length (see mesh.py: build_grid).
+  # diffusion length (see mesh.py: build_diode_grid).
   Wp_um: null
   Wn_um: null
+
+material:
+  # Overrides params.Material - leave commented out to use silicon defaults.
+  # eps_r: 11.7
+  # ni_cm3: 1.0e10
+
+mesh:
+  # Passed straight through to mesh.build_diode_grid. Spacing is sized in
+  # units of the local Debye length; h_min applies at the junction, h_max in
+  # the bulk (see mesh.py for how a non-flat doping profile is resolved too).
+  growth: 1.06
+  bulk_spacing_debye_factor: 5.0
+  junction_spacing_debye_factor: 0.05
 
 voltage_sweep:
   reverse_start_V: -2.0

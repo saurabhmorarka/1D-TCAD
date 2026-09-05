@@ -1,15 +1,25 @@
 # MOS capacitor C-V simulation input parameters.
 #
 # Every value here overrides the corresponding default in mos_params.py.
+# Schema mirrors input_diode.yaml wherever the two devices share a concept
+# (doping profile, mesh knobs, output).
 
 substrate:
-  type: p           # "p" or "n" - which carrier is majority in the substrate
-  doping_cm3: 1.0e16 # substrate doping, cm^-3 (Na if type=p, Nd if type=n)
+  polarity: p        # "p" or "n" - which carrier is majority in the substrate
+  doping:
+    type: flat        # flat | linear | gaussian
+    concentration_cm3: 1.0e16
+    # linear:   start_cm3, end_cm3 (concentration at the oxide interface and
+    #           at the far/bulk edge of the substrate, respectively)
+    # gaussian: peak_cm3, peak_depth_um (depth of the peak from the
+    #           interface, default 0 - e.g. a shallow threshold-adjust
+    #           implant right under the gate), straggle_um, background_cm3
 
 oxide:
   thickness_nm: 1.0  # gate oxide thickness, nm (1nm is deep into the direct-tunneling
                       # regime for a real device - this classical model has no gate
                       # leakage current at all, so treat this as an idealization)
+  eps_r: 3.9          # relative permittivity (default: SiO2)
 
 gate:
   # Gate work function, eV. null = "ideal" MOS assumption (flat-band voltage = 0,
@@ -22,6 +32,14 @@ gate:
   # nonzero flat-band voltage instead.
   workfunction_eV: null
 
+mesh:
+  # Passed straight through to mesh.build_mos_grid.
+  n_ox_points: 15
+  growth: 1.08
+  bulk_spacing_debye_factor: 5.0
+  interface_spacing_debye_factor: 0.001   # tighter than the diode's default -
+                                            # see mesh.py / DEVELOPMENT_LOG.md
+
 voltage_sweep:
   start_V: -0.5
   stop_V: 1.0
@@ -29,6 +47,6 @@ voltage_sweep:
 
 output:
   # Which V_G values (nearest swept match) to save full spatial field
-  # profiles for - same convention as the diode's input.yaml
+  # profiles for - same convention as the diode's input_diode.yaml
   # (list of voltages, "all", or "last").
   save_bias_points: [-0.4, 0.0, 0.3, 0.6, 0.9]

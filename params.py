@@ -10,6 +10,8 @@ All quantities are in CGS-practical semiconductor units:
 """
 from dataclasses import dataclass, field
 
+from doping_profiles import DopingProfile
+
 
 # ---- Universal constants ----
 Q = 1.602176634e-19        # elementary charge, C
@@ -66,3 +68,6 @@ class Device:
     Wp: float = None      # p-side length, cm (None -> auto)
     Wn: float = None      # n-side length, cm (None -> auto)
     n_diffusion_lengths: float = 5.0  # how many L's of quasi-neutral region to keep
+
+    p_profile: DopingProfile = None  # None -> flat at Na (see mesh.build_diode_grid)
+    n_profile: DopingProfile = None  # None -> flat at Nd
