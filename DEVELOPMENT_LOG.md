@@ -1093,3 +1093,90 @@ symptom that had originally been debugged by hand, while the diode and
 metal-gate tests correctly stayed green (the bug is poly-specific).
 Restored the fix and confirmed all four tests pass again before
 committing.
+
+## 14. Session 8: a strongly asymmetric diode, Fermi-Dirac reference curves,
+a new C-V capability, and two more real solver bugs
+
+Extended the diode side to a p-side 1e17 / n-side degenerate-doping case
+(`input_diode_asymmetric.yaml`), to compare Maxwell-Boltzmann (what the
+actual nonlinear PDE solve uses everywhere) against Fermi-Dirac
+statistics, and to add a diode C-V curve alongside the existing I-V one.
+
+**Fermi-Dirac, scoped deliberately narrow.** `fermi_dirac.py` implements
+the Bednarczyk & Bednarczyk (1978) rational approximation for the F_1/2
+Fermi integral, used only for equilibrium/contact reference quantities -
+built-in potential, Shockley I0, depletion width/capacitance
+(`analytic.py`) - not for the transport PDE itself, which would need a
+generalized Einstein relation and is a substantially bigger project. This
+was enough to get a real, explainable physics result: at Nd=1e20, Vbi
+shifts meaningfully (+31mV, 1.012V to 1.043V) while I0/forward current
+barely moves (<0.2%) - injection current is dominated by the
+non-degenerate p-side, so n-side degeneracy matters a lot for the
+electrostatics (Vbi, depletion width) but barely for current.
+
+**A new diode C-V curve**, using the same quasi-static charge-based
+dQ/dV approach already used for the MOS-cap C-V (session 9): integrate
+`Q * (n - p - Cdop)` over the p-side at each bias point, then
+numerically differentiate against Va. Compared against an analytic
+depletion+diffusion capacitance reference curve, with an FD variant when
+the doping is degenerate.
+
+**Two more real solver bugs, same bug-class as session 8's `physics.py`
+fix, found in the separate `newton_solver.py` implementation:**
+- Same Dirichlet-row dilution under `scipy.sparse.linalg.spsolve`'s
+  partial pivoting (a bare `diag=1.0` boundary row getting swamped by a
+  much larger neighboring coefficient) - fixed by scaling each Dirichlet
+  diagonal to at least the largest actual coupling entry in that column.
+- A boundary-condition/density-floor mismatch: the solution is clipped to
+  a 1.0 cm^-3 floor internally, but the boundary target itself was left
+  unclipped - for this doping ratio `p_bc` at the n-side contact came out
+  to ~0.1 cm^-3, below the floor, so the residual there could never reach
+  zero (a permanent, exactly-0.9 stuck residual). Fixed by clipping the
+  boundary targets to the same floor.
+
+**A mesh-sizing bug, and then a further generalization of the fix.** The
+first version of this example (n-side at 1e21, not 1e20) produced a
+23,192-point mesh, because `build_diode_grid`'s bulk-spacing cap used
+`min(L_D_p, L_D_n)` - the shorter side's Debye length - for *both* sides,
+even though the p-side's own Debye length is ~100x longer. Fixed to a
+per-side cap (23192 -> 8966 points). Prompted by the fix, the more basic
+question came up: is Debye length even the right scale for the bulk cap
+at all, on *any* example, not just this one? It isn't - Debye length is
+an electrostatic screening scale, correct for `h_min` at the junction,
+but the bulk region far from the junction needs to resolve the injected
+minority carrier's exponential decay under bias, which is set by the
+*diffusion length* (`mat.Ln`/`mat.Lp`), typically ~100x longer than the
+Debye length. So `h_max` was generalized to
+`max(bulk_spacing_debye_factor * L_D, L_diffusion / 10)` on both sides -
+doping-gradient regions stay separately protected by the mesh's own
+gradient limiter regardless. This dropped the asymmetric example further
+to 372 points and the plain default diode example from 317 to 241, with
+no change to accuracy on either (confirmed via the regression suite,
+`rtol=1e-3`, and via full reruns showing unchanged self-consistency).
+
+**An unresolved convergence limit, elevated to a standing blocker.**
+Pushing the n-side doping further, to 1e21 (genuinely 10,000x the p-side,
+with mesh spacing collapsing to ~0.01nm at the junction to resolve it),
+neither Newton nor Gummel converges robustly across most of a bias
+sweep, even with both bug fixes above applied - large charge
+non-conservation persists at most bias points. Narrowing to the region
+that *does* converge cleanly (forward bias above ~0.4V, self-consistency
+well under 1%) isolated the failure to a warm-started sweep's
+reverse-bias and near-zero-bias region specifically, where the residual
+grows monotonically point to point regardless of solver or mesh density.
+Two natural hypotheses were tested and ruled out: a bad cold start
+propagating forward (fed the first sweep point 300 Gummel iterations
+instead of 15 - identical divergence pattern afterward, and even that
+extended warm start itself only reached ~82% self-consistency); and the
+depletion width exceeding the auto-sized quasi-neutral domain at deep
+reverse bias (directly calculated - depletion width reaches only ~2% of
+the p-side domain even at -3V). Root cause not found. Given this doping
+ratio and bias regime is *exactly* what a real MOSFET's source/drain-to-
+substrate junctions look like (1e20-1e21 cm^-3 against 1e16-1e17 cm^-3,
+normally reverse-biased), this was deliberately not routed around again
+by dialing doping down further - it's recorded as a standing blocker on
+future MOSFET source/drain work, to be root-caused on this simpler 1D
+diode testbed before it's needed there. The 1e20 case (clearly
+degenerate, but inside the solver's actual convergence range) ships as
+the example; `input_diode_asymmetric.yaml` documents the narrowed sweep
+range and why in comments.
