@@ -179,12 +179,6 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, n_bc, p_bc, poisson_scale, c
         cols_list.append(c)
         data_list.append(v)
 
-    # Dirichlet contact rows
-    for i in (0, N - 1):
-        add(np.array([i]), np.array([i]), np.array([1.0]))
-        add(np.array([N + i]), np.array([N + i]), np.array([1.0]))
-        add(np.array([2 * N + i]), np.array([2 * N + i]), np.array([1.0]))
-
     # Poisson interior rows (linear)
     add(idx, idx - 1, lap_m / poisson_scale)
     add(idx, idx, -(lap_m + lap_p) / poisson_scale)
@@ -212,9 +206,36 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, n_bc, p_bc, poisson_scale, c
     add(r_p, 2 * N + idx + 1, dJp_dp_ep1[e_hi] / cv / cont_scale)
     add(r_p, N + idx, Q * dR_dn[idx] / cont_scale)
 
-    rows = np.concatenate(rows_list)
-    cols = np.concatenate(cols_list)
-    data = np.concatenate(data_list)
+    interior_rows = np.concatenate(rows_list)
+    interior_cols = np.concatenate(cols_list)
+    interior_data = np.concatenate(data_list)
+
+    # Dirichlet contact rows: bare diag=1.0 relies on this row's own
+    # equation (1*delta_i = -F_i) staying the pivot spsolve's partial
+    # pivoting picks for that column. That holds when nearby coefficients
+    # are O(1)-ish, but a stiff/degenerate case (e.g. asymmetric doping
+    # with one side near/above the effective density of states) can give
+    # an interior row's coupling entry into this same column - dJn_dpsi_e,
+    # dJn_dn_e etc. above, all evaluated at the node NEXT TO this contact -
+    # a magnitude that dwarfs a bare 1.0, so the solver pivots onto that
+    # row instead and corrupts what must be an exact Dirichlet constraint.
+    # Same failure mode, and same fix, as physics.solve_poisson's Dirichlet
+    # rows (see that function's comment) - scale the diagonal to at least
+    # the largest actual coupling entry already assembled in that column,
+    # so it can never lose the pivot regardless of how extreme the
+    # continuity/Poisson coefficients elsewhere get.
+    dirichlet_idx = [0, N - 1, N + 0, N + N - 1, 2 * N + 0, 2 * N + N - 1]
+    dirichlet_rows, dirichlet_cols, dirichlet_data = [], [], []
+    for i in dirichlet_idx:
+        col_mask = interior_cols == i
+        local_max = np.max(np.abs(interior_data[col_mask])) if np.any(col_mask) else 0.0
+        dirichlet_rows.append(i)
+        dirichlet_cols.append(i)
+        dirichlet_data.append(max(1.0, local_max))
+
+    rows = np.concatenate([interior_rows, dirichlet_rows])
+    cols = np.concatenate([interior_cols, dirichlet_cols])
+    data = np.concatenate([interior_data, dirichlet_data])
     J = sp.coo_matrix((data, (rows, cols)), shape=(3 * N, 3 * N)).tocsc()
     return F, J
 
@@ -232,8 +253,18 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
     n_bcL, p_bcL = contact_values(mat, Cdop[-1])
 
     psi_bc = np.array([psi_eq[0] + Va, psi_eq[-1]])
-    n_bc = np.array([n_bc0, n_bcL])
-    p_bc = np.array([p_bc0, p_bcL])
+    # _residual_and_jacobian clips its solution's n/p to a 1.0 cm^-3 floor
+    # (avoids log/exp underflow issues elsewhere) - for a strongly
+    # asymmetric/degenerate junction, the MINORITY carrier's own
+    # equilibrium contact value (ni^2/N) can legitimately fall below that
+    # floor (e.g. ni^2/Nd < 1 cm^-3 for Nd=1e21), and comparing the
+    # solution's floor-clipped density against an unclipped boundary
+    # target makes that boundary residual permanently unreachable (stuck
+    # at exactly floor-target, never zero, however well everything else
+    # converges) - clip the targets the same way so the comparison is
+    # consistent and the residual can actually reach zero there.
+    n_bc = np.clip(np.array([n_bc0, n_bcL]), 1.0, None)
+    p_bc = np.clip(np.array([p_bc0, p_bcL]), 1.0, None)
 
     if psi_init is None:
         # Cold start (no previous bias point to warm-start from, i.e. the

@@ -128,14 +128,52 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
     L_D_n = _debye_length(mat, n_profile.reference_concentration())
     L_D_min = min(L_D_p, L_D_n)
 
+    # h_min (right at the junction) is shared, tied to the SHORTER Debye
+    # length: the junction's field curvature on BOTH sides is set by
+    # whichever side screens faster, so both sides need that same fine
+    # spacing right at x=0. h_max (how coarse each side's BULK, far from
+    # the junction, is allowed to get) must NOT be shared the same way -
+    # for near-symmetric doping (L_D_p~L_D_n) it doesn't matter which is
+    # used, but for strongly asymmetric doping (e.g. Na=1e17/Nd=1e21, a
+    # ~100x Debye-length ratio) tying the LARGER side's bulk spacing to the
+    # SMALLER side's Debye length wastes enormous numbers of needless
+    # points across microns of quasi-neutral region that doesn't need
+    # anywhere near that resolution - caught when a strongly asymmetric
+    # example produced a 23,000-point mesh (h_max stuck at 0.65nm across a
+    # 9.3um p-side) versus ~350 points for comparably-doped sides.
     h_min = junction_spacing_debye_factor * L_D_min
-    h_max = bulk_spacing_debye_factor * L_D_min
+    # h_max (the coarsest a cell is allowed to get, far out in the
+    # quasi-neutral bulk) was tied to bulk_spacing_debye_factor*L_D - the
+    # DEBYE length, an electrostatic SCREENING scale. That's the right
+    # scale to resolve right at the junction (h_min's job), but the wrong
+    # one for capping the BULK: the thing that actually needs resolving
+    # far from the junction, once a bias is applied, is the injected
+    # MINORITY CARRIER's spatial decay, set by its DIFFUSION length
+    # (mat.Ln on the p-side, mat.Lp on the n-side - the two are typically
+    # ~100x longer than the Debye length, e.g. Ln~1um vs L_D_p~13nm for
+    # this project's default doping). A doping-profile gradient (graded/
+    # gaussian regions) is already independently protected by
+    # _graded_nodes's own gradient-based limiter regardless of h_max, so
+    # for a flat profile there's no remaining reason to cap the bulk any
+    # tighter than what resolves that diffusion-length-scale decay -
+    # tying h_max to the Debye length instead was needlessly tight for
+    # every example (not just an asymmetric one), and became actively
+    # catastrophic for a heavily/degenerately doped side (Debye length
+    # collapses with doping; diffusion length does not, since it depends
+    # on mobility/lifetime, not doping). Confirmed empirically: relaxing
+    # a doping-asymmetric example's mesh this way cut it from 3054 to 475
+    # points with no change in solver behavior at several spot-checked
+    # bias points. min_cells_per_diffusion_length=10 keeps a smooth
+    # exponential decay resolved with a comfortable margin.
+    min_cells_per_diffusion_length = 10.0
+    h_max_p = max(bulk_spacing_debye_factor * L_D_p, mat.Ln / min_cells_per_diffusion_length)
+    h_max_n = max(bulk_spacing_debye_factor * L_D_n, mat.Lp / min_cells_per_diffusion_length)
 
     Wp = dev.Wp if dev.Wp is not None else max(dev.n_diffusion_lengths * mat.Ln, 20 * L_D_p)
     Wn = dev.Wn if dev.Wn is not None else max(dev.n_diffusion_lengths * mat.Lp, 20 * L_D_n)
 
-    x_n_side = _region_nodes(Wn, n_profile, mat, h_min, h_max, growth)          # 0 .. Wn
-    x_p_side = -_region_nodes(Wp, p_profile, mat, h_min, h_max, growth)[::-1]   # -Wp .. 0
+    x_n_side = _region_nodes(Wn, n_profile, mat, h_min, h_max_n, growth)          # 0 .. Wn
+    x_p_side = -_region_nodes(Wp, p_profile, mat, h_min, h_max_p, growth)[::-1]   # -Wp .. 0
 
     x = np.concatenate([x_p_side[:-1], x_n_side])
     x = np.unique(x)  # sorted, dedup the shared 0
@@ -150,7 +188,9 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
         "Wp": Wp,
         "Wn": Wn,
         "h_min": h_min,
-        "h_max": h_max,
+        "h_max": max(h_max_p, h_max_n),
+        "h_max_p": h_max_p,
+        "h_max_n": h_max_n,
         "L_D_p": L_D_p,
         "L_D_n": L_D_n,
         "p_profile": p_profile,

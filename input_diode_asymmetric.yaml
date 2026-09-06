@@ -1,0 +1,78 @@
+# 1D diode simulation input parameters - STRONGLY ASYMMETRIC doping variant
+# of input_diode.yaml: p-side 1e17 cm^-3 (unchanged from the default), n-side
+# 1e21 cm^-3 (vs the default's 1e16) - well above silicon's conduction-band
+# effective density of states (Nc~2.8e19 cm^-3), i.e. genuinely degenerate.
+#
+# Run with: python3 main.py input_diode_asymmetric.yaml
+#
+# What this is for: comparing Maxwell-Boltzmann (what the actual nonlinear
+# Poisson+continuity PDE solve uses throughout - see physics.py) against
+# Fermi-Dirac statistics (fermi_dirac.py) for the CLOSED-FORM reference
+# curves only - built-in potential, Shockley I0, and depletion/diffusion
+# capacitance. See fermi_dirac.py's module docstring for exactly what is
+# and isn't corrected (the numeric PDE solve itself is NOT re-derived with
+# a generalized Einstein relation - that's a substantially bigger project;
+# this compares Boltzmann vs Fermi-Dirac at the level the two statistics
+# actually diverge for THIS doping: the degenerate n-side's own equilibrium
+# reference, not the transport physics).
+
+doping:
+  p_side:
+    type: flat
+    concentration_cm3: 1.0e17
+  n_side:
+    type: flat
+    concentration_cm3: 1.0e20   # degenerate: Nd > Nc (~2.8e19) for Si -
+                                # 1e21 was tried first but pushed the mesh's
+                                # dynamic range (junction spacing vs bulk,
+                                # and doping ratio vs the p-side) far enough
+                                # that neither Newton nor Gummel converged
+                                # robustly across the sweep; 1e20 is still
+                                # clearly degenerate for the FD comparison
+                                # while staying inside the range this
+                                # solver actually converges cleanly in.
+
+thickness:
+  Wp_um: null
+  Wn_um: null
+
+material:
+  # eps_r: 11.7
+  # ni_cm3: 1.0e10
+
+mesh:
+  growth: 1.06
+  bulk_spacing_debye_factor: 5.0
+  junction_spacing_debye_factor: 0.05
+
+voltage_sweep:
+  # Reverse bias and near-zero forward bias (below ~0.4V) are DELIBERATELY
+  # excluded here: this doping ratio hits an unresolved solver-convergence
+  # limit there (see the "tcad1d-extreme-doping-convergence-limit" note) -
+  # both Newton and Gummel diverge across that region regardless of
+  # starting-point quality, for a reason that hasn't been root-caused yet.
+  # Forward bias above ~0.4V converges cleanly (self-consistency well under
+  # 1%) and is also where the Boltzmann-vs-Fermi-Dirac difference actually
+  # shows up in the I-V/C-V curves (diffusion current/capacitance, driven
+  # by the same minority-carrier injection Shockley I0 depends on), so
+  # nothing about the comparison this example exists for is lost by
+  # narrowing the range - it's the reverse-bias depletion-capacitance
+  # C-V branch specifically that this can't currently show for this doping.
+  reverse_points: 0
+  forward_start_V: 0.45
+  forward_stop_V: 1.0     # Vbi (Boltzmann) ~1.01V, Vbi (Fermi-Dirac) ~1.04V
+  forward_points: 30
+
+solver:
+  # newton (not gummel): this doping is strongly asymmetric/degenerate and
+  # the exponential nonlinearity is stiffer than the default example - the
+  # coupled Newton solver's quadratic convergence is both faster and (per
+  # main.py's own solver-benchmark self-consistency check) noticeably more
+  # robust at high forward bias, which matters for the C-V curve's forward
+  # (diffusion-capacitance) branch: numerical differentiation of an
+  # under-converged Gummel Q(Va) amplifies its residual noise visibly.
+  math_model: newton
+
+output:
+  save_bias_points: [0.45, 0.6, 0.75, 0.9, 1.0]
+  structure_file: diode_asym_structure.json

@@ -30,6 +30,12 @@ class Material:
     tau_p: float = 1.0e-9           # SRH hole lifetime, s
     chi_eV: float = 4.05            # Si electron affinity, eV (band diagrams only)
     Eg_eV: float = 1.12             # Si bandgap, eV (300K; band diagrams only)
+    Nc: float = 2.8e19              # conduction-band effective density of states, cm^-3
+                                     # (300K Si) - only used by fermi_dirac.py's degenerate
+                                     # (Fermi-Dirac statistics) equilibrium relations, not by
+                                     # the Boltzmann relations solve_poisson/solve_continuity_*
+                                     # use throughout the actual PDE solve.
+    Nv: float = 1.04e19             # valence-band effective density of states, cm^-3 (300K Si)
 
     @property
     def Vt(self) -> float:

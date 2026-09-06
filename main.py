@@ -13,6 +13,7 @@ defaults input_diode.yaml overrides.
 """
 import csv
 import os
+import sys
 import time
 
 import numpy as np
@@ -22,6 +23,7 @@ import matplotlib.pyplot as plt
 
 from mesh import build_diode_grid
 from solver import solve_equilibrium, voltage_sweep
+from params import Q
 import analytic as an
 import config as cfg
 import field_save as fsave
@@ -34,19 +36,33 @@ os.makedirs(OUT, exist_ok=True)
 # ---- Color palette (qualitative, colorblind-friendly-ish, consistent across plots) ----
 C_NUM = "#1f6feb"     # numeric simulation - blue
 C_AN = "#e8590c"      # analytic / closed-form - orange
+C_AN_FD = "#9d4edd"   # analytic, Fermi-Dirac-corrected reference - purple
 C_GRID = "#c9c9c9"
 
 
 def main():
-    input_cfg = cfg.load_config()
+    # Optional CLI arg selects which input YAML to run (default
+    # input_diode.yaml) - e.g. `python3 main.py input_diode_asymmetric.yaml`.
+    # Output filenames are prefixed by the input file's own name (stripped
+    # of the "input_diode_" prefix) for anything other than the default, so
+    # multiple examples' plots/CSVs can coexist in out/ without clobbering
+    # each other - same convention mos_main.py/mos_poly_sweep.py use.
+    input_path = sys.argv[1] if len(sys.argv) > 1 else cfg.DEFAULT_PATH
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    prefix = "" if base == "input_diode" else base.replace("input_diode_", "").replace("input_diode", "diode") + "_"
+
+    def outp(name):
+        return os.path.join(OUT, prefix + name)
+
+    input_cfg = cfg.load_config(input_path)
     mat, dev, Va_list, math_model, save_bias_points, mesh_opts, structure_file = cfg.build_from_config(input_cfg)
-    print(f"Loaded input_diode.yaml (solver.math_model={math_model!r})" if input_cfg
-          else "No input_diode.yaml found - using params.py defaults")
+    print(f"Loaded {os.path.basename(input_path)} (solver.math_model={math_model!r})" if input_cfg
+          else f"No {os.path.basename(input_path)} found - using params.py defaults")
 
     g = build_diode_grid(mat, dev, **mesh_opts)
     x, Cdop = g["x"], g["Cdop"]
     print(f"Grid: {len(x)} points, Wp={g['Wp']*1e4:.2f} um, Wn={g['Wn']*1e4:.2f} um, "
-          f"h_min={g['h_min']*1e7:.2f} nm, h_max={g['h_max']*1e7:.2f} nm")
+          f"h_min={g['h_min']*1e7:.2f} nm, h_max_p={g['h_max_p']*1e7:.2f} nm, h_max_n={g['h_max_n']*1e7:.2f} nm")
     print(f"Doping: Na={dev.Na:.2e} cm^-3 (p-side), Nd={dev.Nd:.2e} cm^-3 (n-side)")
     print(f"Ln={mat.Ln*1e4:.2f} um, Lp={mat.Lp*1e4:.2f} um (tau_n=tau_p={mat.tau_n*1e9:.2g} ns)")
 
@@ -61,6 +77,18 @@ def main():
     print(f"  Depletion width (analytic, step-junction approx): xp={xp_an*1e4:.4f} um, "
           f"xn={xn_an*1e4:.4f} um, W={W_an*1e4:.4f} um")
 
+    # Fermi-Dirac comparison: only meaningful (and only computed) when a
+    # side is degenerate enough for the closed-form reference to actually
+    # shift - see fermi_dirac.py for exactly what is/isn't corrected (the
+    # numeric PDE solve above stays Boltzmann-only either way).
+    is_degenerate = dev.Na > 0.1 * mat.Nv or dev.Nd > 0.1 * mat.Nc
+    if is_degenerate:
+        Vbi_an_fd = an.built_in_potential_fd(mat, dev)
+        print(f"  Fermi-Dirac reference (doping approaches/exceeds Nc={mat.Nc:.1e}/Nv={mat.Nv:.1e} "
+              f"cm^-3 - Boltzmann may be inaccurate here):")
+        print(f"    Built-in potential (Fermi-Dirac) = {Vbi_an_fd:.4f} V "
+              f"(vs Boltzmann {Vbi_an:.4f} V, diff={Vbi_an_fd-Vbi_an:+.4f} V)")
+
     # ---- Voltage sweep (solver chosen by input_diode.yaml: solver.math_model) ----
     print(f"\nRunning bias sweep ({math_model} drift-diffusion solve per point)...")
     _, _, _, results = voltage_sweep(x, Cdop, mat, dev, Va_list, verbose=False, method=math_model)
@@ -72,6 +100,11 @@ def main():
     I0 = an.shockley_I0(mat, dev)
 
     print(f"\nShockley I0 (long-base ideal diode) = {I0:.4e} A")
+    if is_degenerate:
+        I0_fd = an.shockley_I0_fd(mat, dev)
+        I_an_fd = I0_fd * (np.exp(Va_arr / mat.Vt) - 1.0)
+        print(f"  Shockley I0 (Fermi-Dirac-corrected minority reference) = {I0_fd:.4e} A "
+              f"(ratio to Boltzmann: {I0_fd/I0:.4f})")
     print(f"{'Va (V)':>8} {'I_num (A)':>14} {'I_shockley (A)':>16} {'ratio':>10} {'self-consist(%)':>16}")
     for Va, In, Ia, res in zip(Va_arr, I_num, I_an, results):
         ratio = In / Ia if abs(Ia) > 1e-30 else float("nan")
@@ -110,7 +143,7 @@ def main():
         ax.grid(alpha=0.3, color=C_GRID)
     fig.suptitle(f"Equilibrium band bending  (Vbi: numeric={Vbi_num:.4f} V, analytic={Vbi_an:.4f} V)")
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "01_equilibrium_potential.png"), dpi=150)
+    fig.savefig(outp("01_equilibrium_potential.png"), dpi=150)
     plt.close(fig)
 
     # 2. Carrier concentration profiles: equilibrium and a forward bias case
@@ -129,7 +162,7 @@ def main():
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3, color=C_GRID, which="both")
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "02_carrier_profiles.png"), dpi=150)
+    fig.savefig(outp("02_carrier_profiles.png"), dpi=150)
     plt.close(fig)
 
     # 3. I-V curve: linear (forward only) and semilog |I| (full range)
@@ -139,7 +172,10 @@ def main():
     ax.plot(Va_arr[fmask], I_num[fmask] * 1e3, color=C_NUM, lw=2, marker="o", ms=3,
             label="Numeric drift-diffusion")
     ax.plot(Va_arr[fmask], I_an[fmask] * 1e3, color=C_AN, lw=1.8, ls="--",
-            label="Shockley ideal diode")
+            label="Shockley ideal diode (Boltzmann)")
+    if is_degenerate:
+        ax.plot(Va_arr[fmask], I_an_fd[fmask] * 1e3, color=C_AN_FD, lw=1.8, ls=":",
+                label="Shockley ideal diode (Fermi-Dirac ref.)")
     ax.set_xlabel("Applied voltage Va (V)")
     ax.set_ylabel("Current (mA)")
     ax.set_title("Forward I-V (linear)")
@@ -150,14 +186,17 @@ def main():
     ax.semilogy(Va_arr, np.abs(I_num), color=C_NUM, lw=2, marker="o", ms=3,
                 label="Numeric drift-diffusion")
     ax.semilogy(Va_arr, np.abs(I_an), color=C_AN, lw=1.8, ls="--",
-                label="Shockley ideal diode")
+                label="Shockley ideal diode (Boltzmann)")
+    if is_degenerate:
+        ax.semilogy(Va_arr, np.abs(I_an_fd), color=C_AN_FD, lw=1.8, ls=":",
+                    label="Shockley ideal diode (Fermi-Dirac ref.)")
     ax.set_xlabel("Applied voltage Va (V)")
     ax.set_ylabel("|Current| (A)")
     ax.set_title("I-V (semilog magnitude, incl. reverse bias)")
     ax.legend()
     ax.grid(alpha=0.3, color=C_GRID, which="both")
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "03_iv_curve.png"), dpi=150)
+    fig.savefig(outp("03_iv_curve.png"), dpi=150)
     plt.close(fig)
 
     # 4. Ideality factor vs voltage
@@ -171,8 +210,83 @@ def main():
     ax.legend()
     ax.grid(alpha=0.3, color=C_GRID)
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "04_ideality_factor.png"), dpi=150)
+    fig.savefig(outp("04_ideality_factor.png"), dpi=150)
     plt.close(fig)
+
+    # 4b. Diode C-V: quasi-static charge-based dQ/dVa, both mechanisms in
+    # one curve (depletion capacitance in reverse/near-zero bias, diffusion
+    # capacitance in forward bias, once minority-carrier storage current
+    # dominates). Unlike the MOS-cap (a true equilibrium capacitor, no
+    # current), the diode carries real current at every swept bias, so
+    # there's no literal small-signal AC solve here - Q(Va) is the total
+    # charge per unit area (net space charge, INCLUDING the majority/
+    # minority carrier redistribution the steady-state solve already
+    # computed) integrated over the p-side only. By global charge
+    # neutrality of the whole device (Poisson's own boundary conditions
+    # enforce it), the n-side integral gives the same magnitude with the
+    # opposite sign, so either side's dQ/dVa is the same terminal
+    # capacitance - the p-side is used here by convention, mirroring how
+    # mos_solver.semiconductor_charge always integrates/evaluates on one
+    # consistent side. This is a LOW-FREQUENCY (quasi-static) approximation:
+    # a true frequency-domain small-signal solve would show the diffusion
+    # capacitance rolling off above roughly 1/tau_minority-lifetime, which
+    # a quasi-static DC sweep can't capture.
+    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz  # numpy>=2.0 renamed trapz
+    p_side_mask = x <= 0.0
+    Q_pside = np.array([
+        _trapz((Q * (r["n"] - r["p"] - Cdop))[p_side_mask], x[p_side_mask]) for r in results
+    ])
+    order = np.argsort(Va_arr)
+    Va_sorted, Q_sorted = Va_arr[order], Q_pside[order]
+    # Sign check: capacitance must come out positive - fix the overall sign
+    # of the numeric derivative to match that, rather than assume it. Prefer
+    # checking in reverse bias if the sweep includes it (unambiguously
+    # positive there per the depletion approximation, eps/W); fall back to
+    # the mean over whatever range IS swept (e.g. a forward-bias-only sweep)
+    # since diffusion capacitance is positive by the same dQ/dV convention.
+    dQdV = np.gradient(Q_sorted, Va_sorted)
+    reverse_mask = Va_sorted < -0.5
+    sign_ref = np.mean(dQdV[reverse_mask]) if np.any(reverse_mask) else np.mean(dQdV)
+    C_num_sorted = dQdV if sign_ref > 0 else -dQdV
+    C_num = np.empty_like(C_num_sorted)
+    C_num[order] = C_num_sorted
+
+    C_an = an.cv_curve_analytic(mat, dev, Va_arr, use_fd=False)
+    if is_degenerate:
+        C_an_fd = an.cv_curve_analytic(mat, dev, Va_arr, use_fd=True)
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    ax.semilogy(Va_arr, np.abs(C_num), color=C_NUM, lw=2, marker="o", ms=3,
+                label="Numeric (quasi-static dQ/dVa)")
+    ax.semilogy(Va_arr, C_an, color=C_AN, lw=1.8, ls="--",
+                label="Analytic: C_depletion + C_diffusion (Boltzmann)")
+    if is_degenerate:
+        ax.semilogy(Va_arr, C_an_fd, color=C_AN_FD, lw=1.8, ls=":",
+                    label="Analytic: C_depletion + C_diffusion (Fermi-Dirac ref.)")
+    ax.axvline(0, color=C_GRID, lw=1, zorder=0)
+    ax.set_xlabel("Applied voltage Va (V)")
+    ax.set_ylabel("Capacitance per unit area (F/cm^2)")
+    ax.set_title("Diode C-V: depletion capacitance (reverse/near-zero bias)\n"
+                 "-> diffusion capacitance (forward bias, minority-carrier storage)")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3, color=C_GRID, which="both")
+    fig.tight_layout()
+    fig.savefig(outp("10_cv_curve.png"), dpi=150)
+    plt.close(fig)
+
+    cv_csv = outp("cv_sweep.csv")
+    with open(cv_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        header = ["Va_V", "Q_pside_C_cm2", "C_numeric_F_cm2", "C_analytic_boltzmann_F_cm2"]
+        if is_degenerate:
+            header.append("C_analytic_fd_F_cm2")
+        w.writerow(header)
+        for i, Va in enumerate(Va_arr):
+            row = [f"{Va:.4f}", f"{Q_pside[i]:.6e}", f"{C_num[i]:.6e}", f"{C_an[i]:.6e}"]
+            if is_degenerate:
+                row.append(f"{C_an_fd[i]:.6e}")
+            w.writerow(row)
+    print(f"\nSaved diode C-V data to {cv_csv}")
 
     # 5. Quasi-Fermi potentials (non-equilibrium) at a configurable set of bias points
     # (input_diode.yaml: output.save_bias_points - a list of Va values, "all", or "last")
@@ -187,10 +301,10 @@ def main():
     ax.legend(fontsize=7, ncol=2)
     ax.grid(alpha=0.3, color=C_GRID)
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "05_quasi_fermi_potentials.png"), dpi=150)
+    fig.savefig(outp("05_quasi_fermi_potentials.png"), dpi=150)
     plt.close(fig)
 
-    fields_csv = os.path.join(OUT, "fields_by_bias.csv")
+    fields_csv = outp("fields_by_bias.csv")
     fsave.save_fields(results, save_idx, "Va", fields_csv, x)
     print(f"\nSaved full field profiles for Va = {[round(results[i]['Va'], 4) for i in save_idx]} "
           f"to {fields_csv}")
@@ -226,17 +340,17 @@ def main():
     band_charge_xlim = (-zoom_half_width_um, zoom_half_width_um)
     fig = tplot.plot_structure(struct_doc).figure
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "07_structure.png"), dpi=150)
+    fig.savefig(outp("07_structure.png"), dpi=150)
     plt.close(fig)
 
     fig = tplot.plot_bands(struct_doc, bias_index=0, xlim_um=band_charge_xlim).figure
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "08_band_diagram.png"), dpi=150)
+    fig.savefig(outp("08_band_diagram.png"), dpi=150)
     plt.close(fig)
 
     fig = tplot.plot_charge(struct_doc, bias_index=0, xlim_um=band_charge_xlim).figure
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "09_charge_density.png"), dpi=150)
+    fig.savefig(outp("09_charge_density.png"), dpi=150)
     plt.close(fig)
 
     # ================= Solver runtime benchmark: Gummel vs Newton =================
@@ -284,10 +398,10 @@ def main():
     ax.legend()
     ax.grid(alpha=0.3, color=C_GRID)
     fig.tight_layout()
-    fig.savefig(os.path.join(OUT, "06_solver_benchmark.png"), dpi=150)
+    fig.savefig(outp("06_solver_benchmark.png"), dpi=150)
     plt.close(fig)
 
-    bench_csv = os.path.join(OUT, "solver_benchmark.csv")
+    bench_csv = outp("solver_benchmark.csv")
     with open(bench_csv, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["Va_V", "gummel_time_s", "gummel_iters", "newton_time_s", "newton_iters"])
@@ -297,7 +411,7 @@ def main():
                         f"{bench['newton']['times'][i]:.5f}", bench["newton"]["iters"][i]])
 
     # ---- CSV export ----
-    csv_path = os.path.join(OUT, "iv_sweep.csv")
+    csv_path = outp("iv_sweep.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["Va_V", "I_numeric_A", "I_shockley_A", "self_consistency_pct"])
@@ -306,18 +420,11 @@ def main():
                         f"{res['J_std']/max(abs(res['J_mean']),1e-30)*100:.4f}"])
 
     print(f"\nPlots and data written to: {OUT}")
-    print("  01_equilibrium_potential.png")
-    print("  02_carrier_profiles.png")
-    print("  03_iv_curve.png")
-    print("  04_ideality_factor.png")
-    print("  05_quasi_fermi_potentials.png")
-    print("  06_solver_benchmark.png")
-    print("  07_structure.png")
-    print("  08_band_diagram.png")
-    print("  09_charge_density.png")
-    print("  fields_by_bias.csv")
-    print("  iv_sweep.csv")
-    print("  solver_benchmark.csv")
+    for name in ["01_equilibrium_potential.png", "02_carrier_profiles.png", "03_iv_curve.png",
+                 "04_ideality_factor.png", "05_quasi_fermi_potentials.png", "06_solver_benchmark.png",
+                 "07_structure.png", "08_band_diagram.png", "09_charge_density.png", "10_cv_curve.png",
+                 "fields_by_bias.csv", "iv_sweep.csv", "cv_sweep.csv", "solver_benchmark.csv"]:
+        print(f"  {prefix}{name}")
     if structure_file:
         print(f"  {structure_file}  (standalone: python3 plot.py out/{structure_file})")
 
