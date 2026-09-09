@@ -1180,3 +1180,88 @@ diode testbed before it's needed there. The 1e20 case (clearly
 degenerate, but inside the solver's actual convergence range) ships as
 the example; `input_diode_asymmetric.yaml` documents the narrowed sweep
 range and why in comments.
+
+## 15. Session 9: the session-8 convergence blocker resolved via a
+quasi-Fermi-potential Newton formulation, and a C-V extraction fix
+
+Picked the session-8 blocker back up: the coupled Newton solver
+(`newton_solver.py`, raw densities `n`/`p` with Scharfetter-Gummel flux)
+still would not converge across reverse bias for the strongly asymmetric,
+degenerately-doped junction (p-side 1e17, n-side 1e20-1e21 cm^-3). Two
+reformulation attempts changing only the Newton unknowns to log-density
+(`ln(n/ni)`, `ln(p/ni)`) while keeping Scharfetter-Gummel - one with
+column-only chain-rule Jacobian scaling, one with full row+column
+equilibration matching a 2025 published technique - both failed to fix
+the target case, and the second even regressed a previously-clean 1e20
+example. Both are preserved, uncommitted, on an abandoned
+`log-density-formulation` branch.
+
+The fix came from reading real device-simulator source rather than more
+reformulation attempts. Genius-TCAD-Open (open-source C++) stays in raw
+densities and gets its robustness from Bank-Rose potential damping plus a
+PETSc linear-solve backend, not from reparametrizing the unknowns -
+suggesting the unknowns weren't the actual problem. A local copy of
+FLOOXS (`~/Desktop/github_flooxs`) has two formulations: its "SG" path
+matches this project's existing solver; its "QF" path - used by its main,
+degenerate-doping-capable models - solves directly for the quasi-Fermi
+potentials `phin`/`phip` (a quantity this codebase already computes
+post-hoc) and uses a **plain-gradient current with no Scharfetter-Gummel
+exponential fitting at all** (`Jn = -q*mu_n*n*grad(phin)`). This removes a
+whole layer of compounding nonlinearity both failed attempts kept: SG's
+own exponential stacked on top of the density's exponential dependence on
+potential.
+
+Implemented as a new, additive module (`newton_solver_qf.py`, wired in as
+a third `math_model: newton_qf` option in `solver.py`/`config.py`) rather
+than replacing the existing solver, so every prior example's behavior
+stays identical unless it opts in. The hand-derived analytic Jacobian's
+first version had a systematic sign bug - every flux-derivative entry in
+both continuity rows was negated - caught by a finite-difference check
+showing a uniform relative error of exactly 2.0 across every sampled
+entry (a clean constant ratio, not scattered noise, is the signature of a
+sign-convention bug rather than a real discrepancy). After the fix, the
+FD check passed to floating-point precision (~1e-10).
+
+End to end, the actual target case - 1e21 doping, the full -2V to +1V
+sweep including reverse bias - now converges with self-consistency
+~0.000-0.006% throughout. A second, unrelated bug turned up while
+regenerating the shipped `out/` examples with the new solver: warm-
+starting a bias point from the exact Va=0 equilibrium solution (where
+`phin=phip` are flat everywhere) makes the flux-vs-potential Jacobian
+coupling vanish identically at every edge, which let Newton's line search
+stall on a garbage but small-enough-looking residual (`phip` reaching
+-612V) - manifesting as a completely frozen I-V curve for 29 consecutive
+bias points. Fixed with a physical-magnitude cap on each Newton step's
+raw `phin`/`phip` delta, plus a Gummel-restart retry whenever a warm-
+started solve's own residual exceeds a stall threshold. Both examples
+(`input_diode.yaml`, `input_diode_asymmetric.yaml`) now default to
+`newton_qf`; the asymmetric example's doping was restored to its intended
+1e21 with the full reverse-bias sweep re-enabled (removing the 1e20/
+forward-only workaround from session 8).
+
+Separately, a long-standing but previously-unnoticed C-V bug surfaced
+once the asymmetric example could finally run its full sweep: the
+numeric depletion capacitance came out flat and ~10x too low against the
+analytic reference across nearly the whole bias range (present even
+before this session, at the old 1e20 config - not a regression from the
+solver switch). Root cause: `main.py`'s C-V integral included the
+p-side's minority-carrier ("pileup") layer, where `n` stays close to the
+n-side's own value for several nm past the junction simply because `psi`
+hasn't dropped yet that close in - real, Boltzmann-exact physics, not a
+solver or mesh artifact (the local Debye length at 1e21 doping is 0.13nm
+against an actual mesh spacing there of 0.0065nm - 20 points per Debye
+length, i.e. already over-resolved, so tightening the mesh further was
+never going to be the fix). This pileup charge is 5-15x larger than the
+true depletion charge and nearly bias-independent, so integrating it
+together with the real depletion charge and differentiating produces a
+near-total cancellation against the actual signal. Fixed by measuring the
+pileup layer's physical width once from the equilibrium solution
+(wherever the minority carrier exceeds 10x local doping) and excluding a
+fixed, 2x-margined node range beyond it from the integral at every bias
+point - fixed rather than re-evaluated per bias point, so it doesn't
+introduce staircase noise, and it reduces to a zero-width (no-op) case
+for the default diode's mild doping ratio. The asymmetric example's C-V
+curve now tracks the analytic reference to within 2-8% from -2V through
+about +0.5V, diverging only near/above the built-in potential where the
+closed-form diffusion-capacitance term is already known to break down
+(same limitation the default diode's curve already shows).

@@ -22,15 +22,18 @@ doping:
     concentration_cm3: 1.0e17
   n_side:
     type: flat
-    concentration_cm3: 1.0e20   # degenerate: Nd > Nc (~2.8e19) for Si -
-                                # 1e21 was tried first but pushed the mesh's
-                                # dynamic range (junction spacing vs bulk,
-                                # and doping ratio vs the p-side) far enough
-                                # that neither Newton nor Gummel converged
-                                # robustly across the sweep; 1e20 is still
-                                # clearly degenerate for the FD comparison
-                                # while staying inside the range this
-                                # solver actually converges cleanly in.
+    concentration_cm3: 1.0e21   # degenerate: Nd > Nc (~2.8e19) for Si.
+                                # This is the real target doping (matches a
+                                # MOSFET source/drain against a lighter
+                                # substrate) - it used to be dialed back to
+                                # 1e20 and forward-bias-only because neither
+                                # Newton nor Gummel converged robustly at
+                                # 1e21 across reverse bias (see the pinned
+                                # tcad1d-extreme-doping-convergence-limit
+                                # note for the full history). Fixed by
+                                # switching to the newton_qf solver below -
+                                # full sweep including reverse bias now
+                                # converges cleanly at the real 1e21 doping.
 
 thickness:
   Wp_um: null
@@ -46,32 +49,27 @@ mesh:
   junction_spacing_debye_factor: 0.05
 
 voltage_sweep:
-  # Reverse bias and near-zero forward bias (below ~0.4V) are DELIBERATELY
-  # excluded here: this doping ratio hits an unresolved solver-convergence
-  # limit there (see the "tcad1d-extreme-doping-convergence-limit" note) -
-  # both Newton and Gummel diverge across that region regardless of
-  # starting-point quality, for a reason that hasn't been root-caused yet.
-  # Forward bias above ~0.4V converges cleanly (self-consistency well under
-  # 1%) and is also where the Boltzmann-vs-Fermi-Dirac difference actually
-  # shows up in the I-V/C-V curves (diffusion current/capacitance, driven
-  # by the same minority-carrier injection Shockley I0 depends on), so
-  # nothing about the comparison this example exists for is lost by
-  # narrowing the range - it's the reverse-bias depletion-capacitance
-  # C-V branch specifically that this can't currently show for this doping.
-  reverse_points: 0
-  forward_start_V: 0.45
-  forward_stop_V: 1.0     # Vbi (Boltzmann) ~1.01V, Vbi (Fermi-Dirac) ~1.04V
+  # Full sweep including reverse bias - this used to be forward-bias-only
+  # (see the pinned tcad1d-extreme-doping-convergence-limit note) until the
+  # newton_qf solver fixed convergence there too. Vbi (Boltzmann) ~1.01V,
+  # Vbi (Fermi-Dirac) ~1.04V at this doping.
+  reverse_start_V: -2.0
+  reverse_stop_V: -0.05
+  reverse_points: 15
+  forward_start_V: 0.0
+  forward_stop_V: 1.0
   forward_points: 30
 
 solver:
-  # newton (not gummel): this doping is strongly asymmetric/degenerate and
-  # the exponential nonlinearity is stiffer than the default example - the
-  # coupled Newton solver's quadratic convergence is both faster and (per
-  # main.py's own solver-benchmark self-consistency check) noticeably more
-  # robust at high forward bias, which matters for the C-V curve's forward
-  # (diffusion-capacitance) branch: numerical differentiation of an
-  # under-converged Gummel Q(Va) amplifies its residual noise visibly.
-  math_model: newton
+  # newton_qf (not gummel or the raw-density newton): this doping is
+  # strongly asymmetric/degenerate, and this is the specific case that
+  # motivated adding newton_qf in the first place - quasi-Fermi-potential
+  # unknowns with a plain-gradient current (see newton_solver_qf.py),
+  # modeled on the open-source FLOOXS device simulator's "QF" model. Neither
+  # gummel nor the raw-density newton converges robustly here across reverse
+  # bias (see the pinned tcad1d-extreme-doping-convergence-limit note for
+  # the full history of what was tried first and why it didn't work).
+  math_model: newton_qf
 
 output:
   save_bias_points: [0.45, 0.6, 0.75, 0.9, 1.0]

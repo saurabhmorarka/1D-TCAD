@@ -65,8 +65,8 @@ def build_from_config(cfg: dict):
     Va_list = np.concatenate([rev, fwd])
 
     math_model = cfg.get("solver", {}).get("math_model", "gummel")
-    if math_model not in ("gummel", "newton"):
-        raise ValueError(f"solver.math_model must be 'gummel' or 'newton', got {math_model!r}")
+    if math_model not in ("gummel", "newton", "newton_qf"):
+        raise ValueError(f"solver.math_model must be 'gummel', 'newton', or 'newton_qf', got {math_model!r}")
 
     output_cfg = cfg.get("output", {})
     save_bias_points = output_cfg.get("save_bias_points", "last")

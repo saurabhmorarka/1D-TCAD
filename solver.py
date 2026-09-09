@@ -129,18 +129,25 @@ def voltage_sweep(x, Cdop, mat: Material, dev: Device, Va_list, verbose=False, m
     """Sweep applied bias with solution continuation (each point initialized
     from the previous converged solution for robustness/speed).
 
-    method: "gummel" (decoupled Gummel iteration) or "newton" (fully coupled
-    Newton-Krylov with analytic Jacobian, see newton_solver.py) - both share
-    this same continuation/bookkeeping wrapper so they're directly
-    comparable point-by-point.
+    method: "gummel" (decoupled Gummel iteration), "newton" (fully coupled
+    Newton with analytic Jacobian in raw densities + Scharfetter-Gummel, see
+    newton_solver.py), or "newton_qf" (fully coupled Newton in quasi-Fermi
+    potentials with a plain-gradient current instead of Scharfetter-Gummel,
+    see newton_solver_qf.py - aimed at the strongly asymmetric/degenerate
+    doping cases where "newton" doesn't converge) - all three share this same
+    continuation/bookkeeping wrapper so they're directly comparable
+    point-by-point.
     """
     if method == "gummel":
         solve_fn = gummel_solve
     elif method == "newton":
         from newton_solver import newton_gummel_solve
         solve_fn = newton_gummel_solve
+    elif method == "newton_qf":
+        from newton_solver_qf import newton_gummel_solve
+        solve_fn = newton_gummel_solve
     else:
-        raise ValueError(f"method must be 'gummel' or 'newton', got {method!r}")
+        raise ValueError(f"method must be 'gummel', 'newton', or 'newton_qf', got {method!r}")
 
     psi_eq, n_eq, p_eq, _ = solve_equilibrium(x, Cdop, mat)
 

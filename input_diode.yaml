@@ -49,11 +49,24 @@ solver:
   #   gummel  - decoupled Gummel iteration (continuity solves alternated
   #             with a Poisson re-solve). Robust, but can take many outer
   #             iterations (slow, roughly linear convergence).
-  #   newton  - fully coupled Newton solve of Poisson + both continuity
-  #             equations simultaneously (analytic sparse Jacobian, direct
-  #             sparse solve; quadratic convergence, far fewer outer
-  #             iterations; each iteration costs more).
-  math_model: gummel
+  #   newton    - fully coupled Newton solve of Poisson + both continuity
+  #             equations in raw densities (n, p) with a Scharfetter-Gummel
+  #             flux (analytic sparse Jacobian, direct sparse solve;
+  #             quadratic convergence, far fewer outer iterations; each
+  #             iteration costs more).
+  #   newton_qf - fully coupled Newton solve in quasi-Fermi potentials
+  #             (phin, phip) with a plain-gradient current instead of
+  #             Scharfetter-Gummel - see newton_solver_qf.py. Modeled on the
+  #             open-source FLOOXS device simulator's "QF" model, which is
+  #             what its own main/degenerate-doping-capable models use by
+  #             default rather than its separate "SG" (Scharfetter-Gummel)
+  #             path - matched here for the same reason (also fixes the
+  #             convergence failure documented in the pinned
+  #             tcad1d-extreme-doping-convergence-limit note, though this
+  #             example's doping is mild enough that "newton" converges fine
+  #             too - see input_diode_asymmetric.yaml for the case that
+  #             actually needs it).
+  math_model: newton_qf
 
 output:
   # Which Va values (nearest swept match) to save full spatial field

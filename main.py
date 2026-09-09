@@ -232,9 +232,78 @@ def main():
     # capacitance rolling off above roughly 1/tau_minority-lifetime, which
     # a quasi-static DC sweep can't capture.
     _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz  # numpy>=2.0 renamed trapz
-    p_side_mask = x <= 0.0
+    # Strictly < 0, not <= : the mesh places the doping step's first n-side
+    # node exactly AT x=0 (Cdop there is +Nd, not -Na - confirmed via
+    # mesh.build_diode_grid's junction_index placement), matching the
+    # convention analytic.py's own depletion-mask already uses
+    # ("x >= -xp) & (x < 0)"). Including x=0 here pulls the full n-side
+    # doping into what's meant to be a p-side-only charge integral - mostly
+    # harmless for mild doping ratios, but for a strongly asymmetric
+    # junction (e.g. Nd=1e21 vs Na=1e17) that one node's spurious
+    # contribution is ~4 orders of magnitude larger than the real p-side
+    # depletion charge and completely swamps it, producing a numeric C-V
+    # curve that's flat and wrong (caught via the asymmetric diode example).
+    p_side_mask = x < 0.0
+
+    # Extreme/degenerate doping ratios (e.g. the asymmetric example,
+    # Nd=1e21 >> Na=1e17) expose a case the plain p_side_mask integral above
+    # gets wrong even with the x=0 exclusion just fixed: right next to the
+    # junction, the mesh is fine enough (see mesh.py's junction_spacing_
+    # debye_factor) to resolve a real, physically-correct "carrier pileup"
+    # boundary layer - n stays close to its n-side value (n~Nd) for several
+    # nm INTO nominally p-side territory (x<0), simply because psi (and
+    # therefore n=ni*exp((psi-phin)/Vt), continuous and smooth right through
+    # the junction) hasn't dropped by much yet that close in. This is NOT a
+    # mesh/solver bug (verified: n there satisfies the Boltzmann relation
+    # exactly, to float precision, given the locally-converged psi/phin) -
+    # it is the classical depletion approximation's own "totally depleted,
+    # n/p negligible everywhere in the SCR" assumption breaking down right
+    # at an extremely asymmetric step junction, something the closed-form
+    # C_an reference (analytic.py, built on that same assumption) also
+    # can't capture. This pileup charge is real, but (checked numerically)
+    # it is large (5-15x the true depletion charge for the asymmetric
+    # example) and only weakly voltage-dependent, so lumping it into the
+    # same trapz as the true depletion charge and differentiating produces
+    # a near-total cancellation against the genuinely bias-dependent
+    # depletion-charge signal - not a precision/roundoff issue (each Q_pside
+    # sample is itself smooth and well-converged vs Va) but a real physical
+    # near-cancellation between two charge components with opposite Va
+    # trends once conflated into one integral. Fix: identify the pileup
+    # layer's extent ONCE from the equilibrium (Va=0) solution already
+    # computed above (psi_eq/n_eq/p_eq) - where the MINORITY carrier for
+    # each side (n on the p-side, p on the n-side) exceeds
+    # pileup_thresh=10x the local |Cdop|, i.e. carrier density has not yet
+    # fallen appreciably below the doping scale, so the "fully depleted"
+    # approximation the analytic reference itself relies on is not yet
+    # valid there - and exclude a FIXED (Va-independent) node range sized
+    # generously (pileup_margin_factor=2x the equilibrium-measured pileup
+    # WIDTH IN PHYSICAL LENGTH, not node count - the mesh grows
+    # geometrically away from the junction, so doubling node count instead
+    # would massively overshoot the intended physical margin) beyond that,
+    # to comfortably cover how much the pileup layer's width grows under
+    # forward bias (empirically ~3nm at Va=-2V up to ~5nm at Va=+0.8V for
+    # the asymmetric example - well inside a 2x-of-4nm~8nm margin).
+    # Because this cutoff is fixed (computed once, not re-evaluated per Va),
+    # it does NOT introduce the "staircase" noise a per-bias-point threshold
+    # would (the SAME mesh nodes are included/excluded at every Va, so
+    # Q_pside stays smooth in Va and its gradient is well-conditioned).
+    # For a mild doping ratio (e.g. the default diode) this finds no
+    # pileup layer at all (width=0) and the mask reduces to exactly
+    # p_side_mask, i.e. bit-for-bit unchanged behavior there.
+    pileup_thresh = 10.0
+    pileup_margin_factor = 2.0
+    ji = g["junction_index"]
+
+    j = ji - 1
+    while j > 0 and n_eq[j] > pileup_thresh * abs(Cdop[j]):
+        j -= 1
+    width_p = x[ji - 1] - x[j]  # physical width (cm) of the equilibrium pileup layer, >=0
+    x_cutoff_p = x[ji - 1] - pileup_margin_factor * width_p if width_p > 0 else -np.inf
+    j_p_cutoff = int(np.searchsorted(x, x_cutoff_p, side="left"))
+
+    dep_mask = p_side_mask & (x >= x[j_p_cutoff])
     Q_pside = np.array([
-        _trapz((Q * (r["n"] - r["p"] - Cdop))[p_side_mask], x[p_side_mask]) for r in results
+        _trapz((Q * (r["n"] - r["p"] - Cdop))[dep_mask], x[dep_mask]) for r in results
     ])
     order = np.argsort(Va_arr)
     Va_sorted, Q_sorted = Va_arr[order], Q_pside[order]
@@ -356,10 +425,16 @@ def main():
     # ================= Solver runtime benchmark: Gummel vs Newton =================
     # Runs BOTH solvers across the same voltage sweep (independent of which one
     # produced the results/plots above) so their wall-clock cost is directly
-    # comparable point-by-point, not just at one bias.
-    print("\nBenchmarking solvers (Gummel iteration vs coupled Newton) across the full sweep...")
+    # comparable point-by-point, not just at one bias. Benchmarks against
+    # whichever Newton-family solver this example is actually configured to
+    # use (math_model) - not hardcoded to the raw-density "newton" - so a
+    # newton_qf example benchmarks against newton_qf, not against a solver
+    # known not to converge for that case.
+    newton_method = math_model if math_model != "gummel" else "newton"
+    newton_label = {"newton": "Newton (coupled)", "newton_qf": "Newton (QF)"}[newton_method]
+    print(f"\nBenchmarking solvers (Gummel iteration vs {newton_label}) across the full sweep...")
     bench = {}
-    for method in ("gummel", "newton"):
+    for method in ("gummel", newton_method):
         t0 = time.perf_counter()
         _, _, _, bres = voltage_sweep(x, Cdop, mat, dev, Va_list, verbose=False, method=method)
         total_t = time.perf_counter() - t0
@@ -369,32 +444,32 @@ def main():
             "times": np.array([r["solve_time_s"] for r in bres]),
             "iters": np.array([r["iters"] for r in bres]),
         }
-        print(f"  {method:8s}: total={total_t:.3f}s over {len(Va_list)} points "
+        print(f"  {method:9s}: total={total_t:.3f}s over {len(Va_list)} points "
               f"(avg {total_t/len(Va_list)*1e3:.1f} ms/point, "
               f"avg {bench[method]['iters'].mean():.1f} iters/point)")
 
-    speedup = bench["gummel"]["total_time"] / bench["newton"]["total_time"]
-    print(f"  Newton is {speedup:.2f}x faster than Gummel over the full sweep "
-          f"({bench['gummel']['total_time']:.3f}s vs {bench['newton']['total_time']:.3f}s)")
+    speedup = bench["gummel"]["total_time"] / bench[newton_method]["total_time"]
+    print(f"  {newton_label} is {speedup:.2f}x faster than Gummel over the full sweep "
+          f"({bench['gummel']['total_time']:.3f}s vs {bench[newton_method]['total_time']:.3f}s)")
 
     # 5. Solver benchmark plot: per-point time and iteration count, Gummel vs Newton
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.8))
     ax = axes[0]
     ax.plot(Va_arr, bench["gummel"]["times"] * 1e3, color=C_AN, lw=2, marker="o", ms=3, label="Gummel")
-    ax.plot(Va_arr, bench["newton"]["times"] * 1e3, color=C_NUM, lw=2, marker="o", ms=3, label="Newton (coupled)")
+    ax.plot(Va_arr, bench[newton_method]["times"] * 1e3, color=C_NUM, lw=2, marker="o", ms=3, label=newton_label)
     ax.set_xlabel("Applied voltage Va (V)")
     ax.set_ylabel("Solve time per bias point (ms)")
     ax.set_title(f"Per-point solve time  (total: Gummel {bench['gummel']['total_time']:.2f}s, "
-                 f"Newton {bench['newton']['total_time']:.2f}s, {speedup:.1f}x speedup)")
+                 f"{newton_label} {bench[newton_method]['total_time']:.2f}s, {speedup:.1f}x speedup)")
     ax.legend()
     ax.grid(alpha=0.3, color=C_GRID)
 
     ax = axes[1]
     ax.plot(Va_arr, bench["gummel"]["iters"], color=C_AN, lw=2, marker="o", ms=3, label="Gummel")
-    ax.plot(Va_arr, bench["newton"]["iters"], color=C_NUM, lw=2, marker="o", ms=3, label="Newton (coupled)")
+    ax.plot(Va_arr, bench[newton_method]["iters"], color=C_NUM, lw=2, marker="o", ms=3, label=newton_label)
     ax.set_xlabel("Applied voltage Va (V)")
     ax.set_ylabel("Outer iterations to converge")
-    ax.set_title("Iteration count  (Newton: quadratic convergence; Gummel: linear)")
+    ax.set_title(f"Iteration count  ({newton_label}: quadratic convergence; Gummel: linear)")
     ax.legend()
     ax.grid(alpha=0.3, color=C_GRID)
     fig.tight_layout()
@@ -404,11 +479,11 @@ def main():
     bench_csv = outp("solver_benchmark.csv")
     with open(bench_csv, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["Va_V", "gummel_time_s", "gummel_iters", "newton_time_s", "newton_iters"])
+        w.writerow(["Va_V", "gummel_time_s", "gummel_iters", f"{newton_method}_time_s", f"{newton_method}_iters"])
         for i, Va in enumerate(Va_arr):
             w.writerow([f"{Va:.4f}",
                         f"{bench['gummel']['times'][i]:.5f}", bench["gummel"]["iters"][i],
-                        f"{bench['newton']['times'][i]:.5f}", bench["newton"]["iters"][i]])
+                        f"{bench[newton_method]['times'][i]:.5f}", bench[newton_method]["iters"][i]])
 
     # ---- CSV export ----
     csv_path = outp("iv_sweep.csv")
