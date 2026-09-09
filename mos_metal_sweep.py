@@ -37,7 +37,7 @@ import mos_analytic as man
 OUT = os.path.join(os.path.dirname(__file__), "out")
 os.makedirs(OUT, exist_ok=True)
 
-DOPINGS_CM3 = [1e16, 3.16e16, 1e17, 3.16e17, 1e18]
+DOPINGS_CM3 = [1e16, 3.16e16, 1e17, 3.16e17, 1e18, 5e18]
 OXIDES_NM = [0.5, 1.0, 2.0, 5.0, 10.0]
 OXIDE_SWEEP_DOPING_CM3 = 1e17  # substrate doping held fixed for the oxide sweep
 

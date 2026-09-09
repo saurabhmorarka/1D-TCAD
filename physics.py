@@ -67,9 +67,24 @@ def bernoulli_deriv(x: np.ndarray) -> np.ndarray:
 def equilibrium_bulk_potential(mat: Material, Cdop: float) -> float:
     """Exact charge-neutral bulk potential (psi with n=p=ni at psi=0) for a
     given net doping Cdop = Nd-Na, solving n0-p0=Cdop, n0*p0=ni^2 exactly
-    (valid even when |Cdop| is not >> ni)."""
+    (valid even when |Cdop| is not >> ni).
+
+    n0 = (Cdop + sqrt(Cdop^2+4ni^2))/2 is the textbook solution, but for
+    Cdop<0 (p-type) and |Cdop|>>ni it subtracts two nearly-equal large
+    numbers: sqrt(Cdop^2+4ni^2) rounds to exactly |Cdop| in float64 once the
+    4ni^2 correction drops below the ~1e-16 relative precision floor (around
+    |Cdop|/ni ~ 1e8, i.e. doping several times 1e18 for silicon's ni~1e10) -
+    n0 then evaluates to exactly 0.0, and log(0) diverges (caught this via a
+    p-sub=5e18 MOS-cap sweep producing NaN/singular-matrix downstream). Fix:
+    for Cdop<0, compute the MAJORITY carrier p0 first (well-conditioned,
+    adding two positive numbers) and get the minority n0=ni^2/p0 from it -
+    algebraically identical, just avoids the cancellation."""
     ni = mat.ni
-    n0 = (Cdop + np.sqrt(Cdop ** 2 + 4 * ni ** 2)) / 2.0
+    if Cdop >= 0:
+        n0 = (Cdop + np.sqrt(Cdop ** 2 + 4 * ni ** 2)) / 2.0
+    else:
+        p0 = (-Cdop + np.sqrt(Cdop ** 2 + 4 * ni ** 2)) / 2.0
+        n0 = ni ** 2 / p0
     return mat.Vt * np.log(n0 / ni)
 
 
