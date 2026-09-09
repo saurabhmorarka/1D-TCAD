@@ -119,7 +119,7 @@ def main():
     _plot_and_save(
         "Nsub (cm^-3)", DOPINGS_CM3, lambda v: f"N_sub={v:.1e} cm^-3", doping_results,
         f"{'p' if sub_sign < 0 else 'n'}-sub doping sweep, t_ox={t_ox_base_nm:.1f} nm",
-        "metal_doping_comparison.png", "metal_doping_sweep_summary.csv",
+        "moscap_psub_doping_sweep_comparison.png", "moscap_psub_doping_sweep_summary.csv",
         ["Nsub_cm3", "V_FB_V", "V_T_V", "C_lf_over_Cox_at_VGmin", "C_lf_over_Cox_at_VGmax"])
 
     # --- Sweep 2: oxide thickness, substrate doping fixed ---
@@ -133,7 +133,7 @@ def main():
     _plot_and_save(
         "t_ox (nm)", OXIDES_NM, lambda v: f"t_ox={v:g} nm", oxide_results,
         f"{'p' if sub_sign < 0 else 'n'}-sub {OXIDE_SWEEP_DOPING_CM3:.0e} cm^-3, oxide thickness sweep",
-        "metal_oxide_comparison.png", "metal_oxide_sweep_summary.csv",
+        "moscap_gate_tox_sweep_comparison.png", "moscap_gate_tox_sweep_summary.csv",
         ["t_ox_nm", "V_FB_V", "V_T_V", "C_lf_over_Cox_at_VGmin", "C_lf_over_Cox_at_VGmax"])
 
 
