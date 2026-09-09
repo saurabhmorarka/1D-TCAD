@@ -165,7 +165,8 @@ def ionization_integral(mat: Material, dev: Device, Va: float, ii_model) -> floa
     E_abs = np.clip(E_abs, 0.0, None)
     alpha_n, alpha_p, _, _ = ionization_coeffs(E_abs, ii_model)
     alpha_eff = np.maximum(alpha_n, alpha_p)
-    return float(np.trapz(alpha_eff, x))
+    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz  # numpy>=2.0 renamed trapz
+    return float(_trapz(alpha_eff, x))
 
 
 def multiplication_factor_miller(Va: np.ndarray, BV: float, n: float = 3.0) -> np.ndarray:

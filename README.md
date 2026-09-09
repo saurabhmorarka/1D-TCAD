@@ -10,6 +10,35 @@ Scharfetter-Gummel machinery (`physics.py`).
   <img src="out/01_cv_curve.png" alt="MOS capacitor C-V curve" width="49%">
 </p>
 
+## Setup
+
+Requires Python 3.9+ (any plain CPython install - no conda needed). Your
+system `python3` almost certainly does NOT already have numpy/scipy/
+matplotlib/pyyaml installed globally, so create a virtual environment first
+rather than trying to run the scripts directly against system Python:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python3 main.py                  # or any other script below
+```
+
+That's the only setup step - every script in this repo (`main.py`,
+`mos_main.py`, `main_avalanche.py`, `mos_poly_sweep.py`,
+`avalanche_diagnostics.py`, `testsuite/test_examples.py`, ...) is then
+runnable directly with `python3 <script>.py` from the repo root, no
+additional configuration, environment variables, or install steps. All
+output (plots, CSVs, structure JSON) is written to `out/`, which already
+exists in the repo with the committed reference outputs - reruns just
+overwrite the files for whichever example you ran.
+
+To confirm everything works end to end after installing:
+
+```bash
+python3 testsuite/test_examples.py   # should print "OK" - 5 tests, no failures
+```
+
 ## Diode (`main.py`, `input_diode.yaml`)
 
 - Builds a nonuniform 1D mesh across a step p-n junction (sub-nm spacing at
