@@ -25,6 +25,7 @@ import config as diode_cfg
 from mesh import build_diode_grid, build_mos_grid
 from solver import voltage_sweep
 import analytic as dan
+import avalanche_config as acfg
 
 import mos_config
 from mos_solver import cv_sweep
@@ -66,6 +67,49 @@ def run_diode(path=None):
         "shockley_I0_A": I0,
         "Va_sample_V": [float(Va_arr[i]) for i in idx],
         "I_numeric_sample_A": [float(I_num[i]) for i in idx],
+    }
+
+
+def run_diode_breakdown(path=None):
+    """Avalanche-breakdown example (newton_avalanche). Regression scalars
+    are deliberately sampled from the WELL-CONVERGED part of the sweep
+    (early reverse bias, well below where the numeric solve's own
+    voltage-controlled-continuation wall lives - see
+    newton_solver_avalanche.py's newton_gummel_solve docstring) plus one
+    pure closed-form number (BV_sze) and one closed-form-only diagnostic
+    (ionization_integral, which depends only on analytic.py's depletion
+    approximation and avalanche.ionization_coeffs, not on the PDE solve at
+    all) - never from inside the sharp runaway itself, so this stays stable
+    under the normal golden-comparison tolerance."""
+    path = path or os.path.join(TCAD1D_ROOT, "input_diode_breakdown.yaml")
+    input_cfg = diode_cfg.load_config(path)
+    mat, dev, Va_list, math_model, save_bias_points, mesh_opts, structure_file = \
+        diode_cfg.build_from_config(input_cfg)
+    av = acfg.parse_avalanche_config(input_cfg)
+
+    g = build_diode_grid(mat, dev,
+                          avalanche_ii_refine={"E_crit_V_cm": av["E_crit_V_cm"],
+                                                "ii_model": av["ii_model"],
+                                                "cells_per_mfp": av["cells_per_mfp"]},
+                          **mesh_opts)
+    x, Cdop = g["x"], g["Cdop"]
+
+    _, _, _, results = voltage_sweep(x, Cdop, mat, dev, Va_list, method="newton_avalanche")
+    Va_arr = np.array([r["Va"] for r in results])
+    I_num = np.array([r["I"] for r in results])
+
+    BV_sze = float(dan.breakdown_voltage_sze(mat, dev))
+    ii_integral_sample = float(dan.ionization_integral(mat, dev, -10.0, av["ii_model"]))
+
+    idx_neg1 = int(np.argmin(np.abs(Va_arr - (-1.0))))
+    idx_neg10 = int(np.argmin(np.abs(Va_arr - (-10.0))))
+
+    return {
+        "n_mesh_points": len(x),
+        "BV_sze_estimate_V": BV_sze,
+        "ionization_integral_at_neg10V": ii_integral_sample,
+        "Va_sample_V": [float(Va_arr[idx_neg1]), float(Va_arr[idx_neg10])],
+        "I_numeric_sample_A": [float(I_num[idx_neg1]), float(I_num[idx_neg10])],
     }
 
 
@@ -181,6 +225,7 @@ def run_mos_poly_sweep(path=None, dopings=POLY_SWEEP_DOPINGS):
 
 EXAMPLES = {
     "diode": run_diode,
+    "diode_breakdown": run_diode_breakdown,
     "mos_metal": run_mos_metal,
     "mos_poly_single": run_mos_poly_single,
     "mos_poly_sweep": run_mos_poly_sweep,

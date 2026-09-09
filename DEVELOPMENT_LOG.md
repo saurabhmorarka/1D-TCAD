@@ -1265,3 +1265,229 @@ curve now tracks the analytic reference to within 2-8% from -2V through
 about +0.5V, diverging only near/above the built-in potential where the
 closed-form diffusion-capacitance term is already known to break down
 (same limitation the default diode's curve already shows).
+
+## 16. Session 10: avalanche/impact-ionization breakdown, a new special
+opt-in mode (branch `avalanche-impact-ionization`)
+
+### 16.1 The ask
+
+Model avalanche breakdown under high reverse bias - impact ionization,
+not modeled anywhere in this codebase before (correctly so: a normal
+CMOS-flow junction never approaches its breakdown voltage). Explicitly a
+special, opt-in capability - "usually turned on with a special switch,
+model, solver, and mesh" - not a change to any default example's
+behavior, plus an old Bank & Rose (1981) "Global Approximate Newton
+Methods" paper the user wanted implemented as a damping strategy for the
+sharp nonlinearity avalanche's exponential field-dependence creates.
+
+### 16.2 The physics: a new generation term, not a new PDE
+
+Impact ionization enters as an extra local electron-hole-pair GENERATION
+rate `G_ii(x)` added to both continuity equations with the OPPOSITE sign
+from SRH recombination (`dJn/dx = q*(R - G_ii)`, `dJp/dx = -q*(R -
+G_ii)`), using the standard van Overstraeten-de Man/Chynoweth local-field
+model (`alpha_n(E) = a_n*exp(-b_n/E)`, holes split into two field
+regions) - new module `avalanche.py`. `G_ii = (alpha_n*|Jn| +
+alpha_p*|Jp|)/q` depends on BOTH carriers' currents, which creates a
+genuinely new coupling absent from `newton_solver_qf.py`: `G_ii` couples
+`phip` into the electron continuity row and `phin` into the hole row
+(previously each only touched the OTHER carrier's row through the SRH
+term at the same node column; avalanche adds a full 3-wide cross-carrier
+stencil).
+
+New solver `newton_solver_avalanche.py` extends `newton_solver_qf.py`'s
+quasi-Fermi-potential/plain-gradient formulation (a new module, not a
+flag threaded into the existing one, matching how `newton_solver_qf.py`
+itself was added alongside `newton_solver.py`). The hand-derived Jacobian
+had one real bug, found via a finite-difference check and worth noting
+for its exact signature: the new `G_ii`-derivative terms were divided by
+the control-volume width `cv` a SECOND time (the box-integrated
+`Gii_node = (hm*Gii_e_lo + hp*Gii_e_hi)/(2*cvol_i)` already has that
+normalization baked in, unlike the flux terms it was bundled alongside in
+the same expression, which DO need the extra `/cv`). Diagnosing it
+required first noticing that a naive FD check on a synthetic sinusoidal
+test profile was itself unreliable - large `eps` values (1e-3 to 1e-4)
+matched the analytic Jacobian to <1% while `eps=1e-6` to `1e-9` gave a
+STABLE (not-eps-dependent) ~5000x mismatch, which is what actually
+distinguished "real bug" (FD converges to a value analytic disagrees
+with, stably, regardless of eps) from "eps too small for the local
+nonlinearity" (FD diverges AS eps shrinks, a catastrophic-cancellation
+signature) - a useful general lesson for validating Jacobians on
+deliberately-adversarial (very large field/current magnitude) test
+points. After the fix, FD agreement reached ~4e-7 relative error on a
+well-scaled test point and ~1.5e-3 on the original adversarial one
+(consistent with second-order truncation error on an extremely nonlinear
+exponential, not a formula error).
+
+### 16.3 Bank & Rose damping: implemented, validated, NOT the default
+
+`bank_rose_damping.py` implements the paper's Algorithm Global (Sect. 3)
+as a solver-agnostic helper, validated standalone against toy nonlinear
+systems (converges quadratically on a well-conditioned coupled system,
+matching plain Newton once near the root). One real bug there too: `K`
+(the damping parameter) can grow unboundedly across outer iterations
+without a ceiling, driving the damped step size `t` to underflow to
+exactly `0.0` and then a `0.0/0.0` in the paper's own eq-3.1 acceptance
+test - fixed with a `K_max` cap and a bounded give-up path (mirroring
+this codebase's existing bounded-retry convention in its other line
+searches).
+
+Despite being correctly implemented, Bank-Rose is NOT
+`newton_solver_avalanche.py`'s default damping - empirically, on the
+shipped breakdown example, its persistent K parameter and strict global
+sufficient-decrease test recovered less gracefully from early rejections
+than plain backtracking (`newton_solver_qf.py`'s existing line search,
+reused here as `damping="line_search"`, the new default), which stayed
+well-converged roughly twice as far into reverse bias before both
+strategies hit the same wall (see below). Bank-Rose remains fully
+available (`damping="bank_rose"`) - see `newton_gummel_solve`'s docstring
+in `newton_solver_avalanche.py` for the full comparison.
+
+### 16.4 The wall: voltage-controlled continuation cannot follow avalanche
+past its own S-curve
+
+Both damping strategies, independently, stall at the same device- and
+mesh-dependent bias (~Va=-23V for the shipped example, well before the
+Sze BV estimate of ~62V) - every subsequent continuation point then
+returns an unchanged, non-physical value. This is not a damping bug: a
+VOLTAGE-controlled bias sweep cannot follow `I(Va)` past the point where
+`dI/dVa` formally diverges (avalanche's own vertical/S-shaped branch) -
+a well-known device-simulation limitation; only a current-controlled
+sweep or a ballast resistor can continue past it, and neither is
+implemented (out of scope this session). `input_diode_breakdown.yaml`'s
+reverse sweep is deliberately kept short of that wall
+(`reverse_stop_V: -22.0`), where clear multiplication is already visible
+(numeric M ratio growing, ionization integral rising smoothly toward 1)
+without the sweep freezing.
+
+### 16.5 Everything else, briefly
+
+`analytic.py` gained three closed-form comparisons (matching this
+project's existing house pattern, e.g. `shockley_current`):
+`breakdown_voltage_sze` (Sze's empirical one-sided-junction formula),
+`ionization_integral` (Selberherr's criterion, evaluated from the
+existing depletion-approximation field profile, independent of the PDE
+solve), and `multiplication_factor_miller`. These two closed forms
+disagree with each other more than the ~10-30% originally guessed (the
+ionization integral crosses 1 around Va~-35V using the depletion
+approximation vs. Sze's ~62V) - expected given how exponentially
+sensitive avalanche onset is to the exact field model and profile shape,
+not a bug in either; documented rather than forced to agree.
+`mesh.build_diode_grid` gained an opt-in `avalanche_ii_refine` kwarg
+(off by default, zero effect on any existing example) that additionally
+caps `h_min` at the impact-ionization mean free path `1/alpha(E_crit)`
+when passed. New driver `main_avalanche.py`, new config parser
+`avalanche_config.py`, new example `input_diode_breakdown.yaml`, new
+regression test `diode_breakdown` in `testsuite/common.py` (metrics
+sampled from the well-converged early-reverse-bias region, never from
+inside the runaway) - full existing suite (4 examples) still passes
+unchanged.
+
+### 16.6 Follow-up: the real bug behind the "wall", and a better example device
+
+Requested diagnostics (I(Va) on linear AND log scales, Bank-Rose vs.
+line-search compared directly with per-point iteration/self-consistency
+plots - new `avalanche_diagnostics.py`) turned out to expose that the
+"wall" described in 16.4 was NOT (mainly) the voltage-controlled-S-curve
+limit it was first diagnosed as. Plotting self-consistency and current
+side by side per bias point showed the reported current jumping by up to
+11 orders of magnitude within a fraction of a volt and then FREEZING at
+an identical, Va-independent value for every subsequent point - not the
+gradual steepening a real S-curve approach produces. Inspecting the
+frozen state directly: electron density pinned at exactly its 1 cm^-3
+floor everywhere, hole density and current several orders of magnitude
+beyond anything physical, yet only 2 Newton iterations and a
+deceptively-not-catastrophic self-consistency ratio (~10) - a genuine
+algebraic root of the discretized system, just the wrong one.
+
+Root cause, found by bisecting what actually changes when this happens:
+`newton_solver_avalanche.py`'s Newton step clip (`_clip`) capped the raw
+`phin`/`phip` correction (`_MAX_QF_STEP`, inherited from
+`newton_solver_qf.py`) but left `psi`'s own raw correction completely
+UNCLIPPED. Under strong avalanche feedback the psi-psi Jacobian block can
+become locally very stiff, letting one Newton step swing `psi` by tens of
+volts and jump clean over the physical (low-current) branch onto a
+spurious one. Two other approaches were tried and reverted before finding
+this: (a) picking between a continuation candidate and a
+fresh-start/generation-strength-ramped candidate by comparing
+self-consistency - abandoned because the spurious branch's
+self-consistency ratio is not reliably worse than the physical branch's,
+so the comparison sometimes picked the WRONG one; (b) the ramp
+machinery itself (`_run_ramp`, an `ii_scale` parameter threaded through
+the residual/Jacobian to turn G_ii on gradually) - removed as dead code
+once the simple psi clip alone proved sufficient. Fix: cap the raw psi
+step at 1V too (`_clip`), same spirit as the existing phin/phip cap.
+Confirmed by testing across sweeps of different point spacing (which had
+been landing on the spurious branch at DIFFERENT bias points depending on
+step size - itself a tell that something was numerically fragile, not
+that a true physical limit had been reached): with the psi clip, the same
+device now sweeps smoothly and reproducibly from equilibrium out to
+~Va=-38V before any issue recurs, up from a first-jump around Va=-18 to
+-31V (device- and spacing-dependent) beforehand.
+
+Separately, plotting the result revealed the shipped example's first
+doping choice (light side 1e16 cm^-3, BV~=62V) needed a very long sweep
+before showing dramatic avalanche behavior, and the light-side field
+strength meant genuinely reliable convergence didn't extend far enough
+past the knee to look convincing on a plot. Retargeted the example to a
+more heavily doped ("Zener-like") light side, 1e17 cm^-3
+(`analytic.breakdown_voltage_sze` gives BV~=11V for this doping) - this
+both matches the intuition that avalanche/Zener diodes commonly break
+down in the 5-15V range at this kind of doping, AND lands the interesting
+physics well inside the solver's now-larger reliable range. The result
+(`input_diode_breakdown.yaml`, `reverse_stop_V: -13.9`) shows a clean,
+textbook breakdown knee on the linear-scale I(Va) plot and a ~2-order-of-
+-magnitude exponential-looking rise on the log-scale plot, crossing the
+no-avalanche baseline by orders of magnitude, with the analytic ionization
+integral crossing 1.0 almost exactly at the Sze BV marker - all three
+independent signals (numeric I(Va), Miller's closed form, the
+depletion-approximation ionization integral) now agree on where breakdown
+happens, unlike the first (1e16-doped) device where they disagreed by
+close to 2x. `avalanche_diagnostics.py`'s comparison confirms Bank-Rose
+still degrades earlier than line-search on this retargeted device too
+(self-consistency spikes to 1e6-1e18 from about Va=-12V on, while
+line-search stays under ~10 all the way to -14V) - the choice of
+line-search as this solver's default stands.
+
+### 16.7 Pushing to visibly large currents: a fine-tail sweep, and a
+robustness safety net
+
+Wanted the example to show current reaching ~1e-5 to 1e-4 A (a genuinely
+large, unmistakable avalanche current), not just the ~2 order-of-magnitude
+rise 16.6 left off with. Manual bisection right at the edge of the
+voltage-controlled wall found a narrow but very clean window - stepping
+in 0.004V increments from -13.8V to -13.988V, current rises smoothly and
+monotonically from ~1e-7 A to 5.6e-5 A with EXCELLENT self-consistency
+throughout (down to ~4e-6 at the final point) - the physical branch is
+there and trackable, it just needs much finer bias-point spacing than is
+practical to use over the whole sweep. New `avalanche_config.py`
+`avalanche.fine_tail` block ({start_V, stop_V, step_V}) and
+`main_avalanche.py`'s `build_fine_tail_va_list()` insert that fine
+spacing only over the last stretch before breakdown, leaving the coarse
+sweep everywhere else unchanged - `input_diode_breakdown.yaml` now
+reaches Va=-13.988V with I~5.6e-5 A (M numeric ~118x by -13.93V) while
+keeping runtime reasonable (153 total points, not thousands).
+
+Separately, this exposed a real (if rare) crash: at very deep bias the
+fresh-start fallback's inner call to newton_solver_qf.py (unmodified,
+correctly - it has no reason to expect avalanche's regime) can overflow
+`exp((psi-phin)/Vt)` badly enough to hand `spsolve` a Jacobian with NaN
+entries, which surfaced as a raw BLAS/LAPACK parameter error instead of a
+catchable Python exception in one aggressive test. Added a broad
+try/except around both the continuation attempt and the fresh-start
+retry in `newton_solver_avalanche.py`'s `newton_gummel_solve`, with a
+last-resort fallback to the last known-good state (never silently
+propagating a crash into the whole sweep) - `_safe_gummel_retry()`. This
+didn't change the production sweep's behavior (it wasn't hitting this
+path with the actual fine_tail spacing used), but makes the module
+robust against a user pushing a future device/sweep past where even the
+fallback solver can cope.
+
+Finally, `main_avalanche.py`'s validation plot now masks (NaN-gates, not
+deletes) isolated bias points whose self-consistency exceeds a threshold
+(5.0) from the PLOTTED curves only - a voltage-controlled sweep can still
+land a single point on a spurious root that the very next point's
+continuation recovers from (it isn't carried forward), and one such
+point was creating a distracting, misleading spike in the plot. The raw
+numbers (self-consistency included) stay in `breakdown_iv.csv`
+regardless, so nothing is hidden, just not misleadingly plotted.

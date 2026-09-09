@@ -125,6 +125,60 @@ def diffusion_capacitance(mat: Material, dev: Device, Va: np.ndarray,
     return (Q / mat.Vt) * (mat.Lp * p0_n_side + mat.Ln * n0_p_side) * np.exp(Va / mat.Vt)
 
 
+def breakdown_voltage_sze(mat: Material, dev: Device) -> float:
+    """Sze's empirical avalanche breakdown voltage for a Si one-sided
+    abrupt junction (Sze, "Physics of Semiconductor Devices"):
+    BV ~= 60*(Eg/1.1)^1.5 * (N_B/1e16)^-0.75 volts, N_B = the LIGHTER
+    side's doping (the side that holds essentially all the depletion
+    width/field in a one-sided junction, and so sets the breakdown field).
+    A pure closed-form number (no simulation dependency) - the primary
+    sanity-check target for the avalanche solver's I(Va) runaway."""
+    N_B = min(dev.Na, dev.Nd)
+    return 60.0 * (mat.Eg_eV / 1.1) ** 1.5 * (N_B / 1.0e16) ** -0.75
+
+
+def ionization_integral(mat: Material, dev: Device, Va: float, ii_model) -> float:
+    """Selberherr's breakdown criterion, evaluated from the closed-form
+    depletion-approximation field profile (NOT the numeric PDE solve):
+    integral of alpha_eff(E(x)) dx across the depletion region. Reaches 1
+    at the (depletion-approximation) breakdown voltage - an independent
+    closed-form cross-check against both breakdown_voltage_sze and the
+    numeric avalanche solver's own current runaway, using the SAME
+    avalanche.ionization_coeffs field model the PDE solver uses, but with
+    the field coming from the simple triangular depletion-approximation
+    profile instead of the self-consistent solve.
+
+    Uses alpha_eff = max(alpha_n, alpha_p) at each point (a common
+    simplified single-carrier approximation of the true coupled
+    ionization-integral criterion, adequate for an order-of-magnitude
+    cross-check; the numeric solver itself uses the full two-carrier
+    G_ii = (alpha_n*|Jn|+alpha_p*|Jp|)/q, so this is deliberately a looser,
+    independent estimate rather than a re-derivation of the same formula)."""
+    from avalanche import ionization_coeffs
+    xp, xn, W = depletion_widths(mat, dev, Va)
+    V = max(built_in_potential(mat, dev) - Va, 1e-6)
+    # Triangular field profile of the depletion approximation: peak field
+    # E_max at x=0, linearly decaying to 0 at each depletion edge.
+    E_max = 2.0 * V / W
+    x = np.linspace(-xp, xn, 2000)
+    E_abs = E_max * (1.0 - np.abs(x) / np.where(x < 0, xp, xn))
+    E_abs = np.clip(E_abs, 0.0, None)
+    alpha_n, alpha_p, _, _ = ionization_coeffs(E_abs, ii_model)
+    alpha_eff = np.maximum(alpha_n, alpha_p)
+    return float(np.trapz(alpha_eff, x))
+
+
+def multiplication_factor_miller(Va: np.ndarray, BV: float, n: float = 3.0) -> np.ndarray:
+    """Miller's empirical avalanche multiplication factor M(Va) =
+    1/(1-(|Va|/BV)^n), n~3 for a one-sided p+/n- junction (n~4-6 for
+    n+/p-). A second, independent closed-form curve (distinct from the
+    ionization-integral criterion above) to overlay against the numeric
+    M(Va) = I_avalanche(Va)/I_no_avalanche(Va)."""
+    Va = np.asarray(Va, dtype=float)
+    ratio = np.clip(np.abs(Va) / BV, 0.0, 1.0 - 1e-6)
+    return 1.0 / (1.0 - ratio ** n)
+
+
 def cv_curve_analytic(mat: Material, dev: Device, Va: np.ndarray, use_fd: bool = False):
     """Combined depletion + diffusion capacitance per unit area, F/cm^2 -
     an approximate closed-form reference (the two mechanisms are simply

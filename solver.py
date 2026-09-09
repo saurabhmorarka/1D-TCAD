@@ -131,12 +131,16 @@ def voltage_sweep(x, Cdop, mat: Material, dev: Device, Va_list, verbose=False, m
 
     method: "gummel" (decoupled Gummel iteration), "newton" (fully coupled
     Newton with analytic Jacobian in raw densities + Scharfetter-Gummel, see
-    newton_solver.py), or "newton_qf" (fully coupled Newton in quasi-Fermi
+    newton_solver.py), "newton_qf" (fully coupled Newton in quasi-Fermi
     potentials with a plain-gradient current instead of Scharfetter-Gummel,
     see newton_solver_qf.py - aimed at the strongly asymmetric/degenerate
-    doping cases where "newton" doesn't converge) - all three share this same
-    continuation/bookkeeping wrapper so they're directly comparable
-    point-by-point.
+    doping cases where "newton" doesn't converge), or "newton_avalanche"
+    (newton_solver_qf.py's formulation EXTENDED with a field-dependent
+    impact-ionization generation term and Bank-Rose damping, see
+    newton_solver_avalanche.py - a special, opt-in mode for modeling
+    avalanche breakdown under high reverse bias; not used by any normal
+    CMOS-flow example) - all four share this same continuation/bookkeeping
+    wrapper so they're directly comparable point-by-point.
     """
     if method == "gummel":
         solve_fn = gummel_solve
@@ -146,8 +150,12 @@ def voltage_sweep(x, Cdop, mat: Material, dev: Device, Va_list, verbose=False, m
     elif method == "newton_qf":
         from newton_solver_qf import newton_gummel_solve
         solve_fn = newton_gummel_solve
+    elif method == "newton_avalanche":
+        from newton_solver_avalanche import newton_gummel_solve
+        solve_fn = newton_gummel_solve
     else:
-        raise ValueError(f"method must be 'gummel', 'newton', or 'newton_qf', got {method!r}")
+        raise ValueError(
+            f"method must be 'gummel', 'newton', 'newton_qf', or 'newton_avalanche', got {method!r}")
 
     psi_eq, n_eq, p_eq, _ = solve_equilibrium(x, Cdop, mat)
 
