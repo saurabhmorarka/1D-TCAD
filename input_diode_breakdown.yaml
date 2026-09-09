@@ -1,0 +1,91 @@
+# 1D diode simulation input parameters - AVALANCHE BREAKDOWN example.
+#
+# Run with: python3 main_avalanche.py
+#
+# Special, opt-in example (NOT part of a normal CMOS flow): a one-sided
+# step junction, heavy p-side (1e19 cm^-3) / light n-side (1e17 cm^-3), so
+# essentially all the depletion width and field sit on the lighter n-side -
+# the standard "one-sided abrupt junction" assumption Sze's empirical
+# breakdown-voltage formula requires. At this doping,
+# analytic.breakdown_voltage_sze() gives BV ~= 11V - a fairly heavily doped
+# ("Zener-like") light side chosen SPECIFICALLY to bring breakdown down into
+# a compact, easy-to-see voltage range (the first version of this example
+# used a 1e16 light side, giving BV~=62V, which needed a much longer sweep
+# to reach and turned out to be numerically much harder to converge deep
+# into - see newton_solver_avalanche.py's module docstring and
+# DEVELOPMENT_LOG.md session 10 for the full story of what that took).
+#
+# Domain sizing: Wn_um comfortably exceeds the depletion width even past
+# breakdown (<0.5 um at Va=-16V, per analytic.depletion_widths) - the
+# default auto-sizing in mesh.build_diode_grid has no notion of "grow for
+# eventual breakdown depletion width", only for the ordinary
+# minority-carrier diffusion length.
+
+doping:
+  p_side:
+    type: flat
+    concentration_cm3: 1.0e19
+  n_side:
+    type: flat
+    concentration_cm3: 1.0e17   # lighter side sets the breakdown voltage (~11V here)
+
+thickness:
+  Wp_um: 1.0   # heavy side: depletion barely penetrates here, quasi-neutral bulk only
+  Wn_um: 6.0   # light side: comfortably exceeds the depletion width even past breakdown
+
+material:
+  # eps_r: 11.7
+  # ni_cm3: 1.0e10
+
+mesh:
+  growth: 1.06
+  bulk_spacing_debye_factor: 5.0
+  junction_spacing_debye_factor: 0.05
+
+avalanche:
+  enabled: true
+  E_crit_V_cm: 4.0e5   # a-priori peak-field estimate, used only to size the mesh
+  cells_per_mfp: 8.0
+  # ii_model defaults to Si van Overstraeten-de Man (avalanche.py)
+
+  # Right at avalanche onset, current rises by orders of magnitude within a
+  # fraction of a volt - far too sharp for the coarse sweep below to track
+  # (a uniform sweep fine enough to resolve THIS transition everywhere
+  # would need thousands of points over the full bias range). fine_tail
+  # concentrates extra-fine bias-point spacing over just this last
+  # stretch, appended after the coarse sweep reaches start_V - see
+  # main_avalanche.py's build_fine_tail_va_list() and
+  # avalanche_config.parse_avalanche_config's docstring. With this, the
+  # sweep tracks the physical (low-current) branch smoothly all the way to
+  # I~5.6e-5 A at stop_V, right up against the voltage-controlled-
+  # continuation wall (see newton_solver_avalanche.py's
+  # newton_gummel_solve docstring) - without it, the coarse sweep alone
+  # loses the physical branch and lands on numerical noise well before
+  # reaching values this large.
+  fine_tail:
+    start_V: -13.8
+    stop_V: -13.988
+    step_V: 0.004
+
+voltage_sweep:
+  # Dense sampling from near-equilibrium through the avalanche runaway.
+  # Ordered near-equilibrium -> deep reverse bias (NOT the other way) so
+  # bias-point continuation gets a gentle cold start at Va=-0.05V and walks
+  # outward - jumping straight to deep reverse bias as the very first
+  # (cold-start) point starves the Newton solve of a good initial guess and
+  # was observed to fail to converge. reverse_stop_V here is just the
+  # COARSE leg's end point - avalanche.fine_tail above takes over from
+  # here down to -13.988V (see that block's comment).
+  reverse_start_V: -0.05
+  reverse_stop_V: -13.8
+  reverse_points: 90
+  forward_start_V: 0.0
+  forward_stop_V: 0.6
+  forward_points: 8
+
+solver:
+  math_model: newton_avalanche
+
+output:
+  save_bias_points: [-1, -6, -10, -12.5, -13.8, -13.98, -13.988]
+  structure_file: diode_breakdown_structure.json

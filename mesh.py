@@ -111,7 +111,8 @@ def _region_nodes(length: float, profile: DopingProfile, mat: Material,
 
 def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
                       bulk_spacing_debye_factor: float = 5.0,
-                      junction_spacing_debye_factor: float = 0.05):
+                      junction_spacing_debye_factor: float = 0.05,
+                      avalanche_ii_refine: dict = None):
     """Build the nonuniform grid and doping profile for a step (or graded)
     p-n junction diode.
 
@@ -120,6 +121,20 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
       Cdop     : net doping Nd-Na at each node, cm^-3
       junction_index : index of node closest to x=0
       Wp, Wn   : region lengths actually used
+
+    avalanche_ii_refine: opt-in extra tightening of h_min for the avalanche
+        breakdown solver (newton_solver_avalanche.py), OFF by default (None)
+        - every existing call site is bit-for-bit unchanged. The junction's
+        Debye-length-tied h_min below resolves electrostatic curvature, but
+        the impact-ionization MEAN FREE PATH 1/alpha(E) at breakdown fields
+        is a different physical length scale that can be shorter for a
+        lightly-doped, high-breakdown-voltage design. Pass a dict
+        {"E_crit_V_cm": <a-priori peak-field estimate>, "ii_model": <an
+        avalanche.AvalancheModel>, "cells_per_mfp": <optional, default 8.0>}
+        to additionally cap h_min at 1/alpha(E_crit)/cells_per_mfp.
+        E_crit_V_cm is only used to SIZE the mesh conservatively ahead of
+        time - it is not solved for, and the field the solver actually
+        converges to may differ.
     """
     p_profile = dev.p_profile if dev.p_profile is not None else DopingProfile.flat(dev.Na)
     n_profile = dev.n_profile if dev.n_profile is not None else DopingProfile.flat(dev.Nd)
@@ -142,6 +157,12 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
     # example produced a 23,000-point mesh (h_max stuck at 0.65nm across a
     # 9.3um p-side) versus ~350 points for comparably-doped sides.
     h_min = junction_spacing_debye_factor * L_D_min
+    if avalanche_ii_refine is not None:
+        from avalanche import ionization_coeffs
+        E_probe = np.array([avalanche_ii_refine["E_crit_V_cm"]])
+        alpha_n, alpha_p, _, _ = ionization_coeffs(E_probe, avalanche_ii_refine["ii_model"])
+        ii_mfp = 1.0 / max(float(alpha_n[0]), float(alpha_p[0]), 1e-30)
+        h_min = min(h_min, ii_mfp / avalanche_ii_refine.get("cells_per_mfp", 8.0))
     # h_max (the coarsest a cell is allowed to get, far out in the
     # quasi-neutral bulk) was tied to bulk_spacing_debye_factor*L_D - the
     # DEBYE length, an electrostatic SCREENING scale. That's the right
