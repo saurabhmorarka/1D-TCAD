@@ -1,0 +1,42 @@
+# Demo config for the material-database + temperature feature: a
+# germanium diode at 350K instead of silicon at the default 300K.
+#
+# Exercises material.name/material.T_K (core/config.py -> core.material_db
+# + core.materials.resolve_material) - see testsuite/test_materials.py and
+# testsuite/test_material_temperature.py for the underlying formula checks.
+
+doping:
+  p_side:
+    type: flat
+    concentration_cm3: 1.0e17
+  n_side:
+    type: flat
+    concentration_cm3: 1.0e16
+
+thickness:
+  Wp_um: null
+  Wn_um: null
+
+material:
+  name: Germanium
+  T_K: 350.0
+
+mesh:
+  growth: 1.06
+  bulk_spacing_debye_factor: 5.0
+  junction_spacing_debye_factor: 0.05
+
+voltage_sweep:
+  reverse_start_V: -2.0
+  reverse_stop_V: -0.05
+  reverse_points: 10
+  forward_start_V: 0.0
+  forward_stop_V: 0.3
+  forward_points: 20
+
+solver:
+  math_model: newton_qf
+
+output:
+  save_bias_points: "last"
+  structure_file: diode_ge_structure.json

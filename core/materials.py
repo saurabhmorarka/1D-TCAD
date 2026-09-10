@@ -13,6 +13,10 @@ concentration -> cm^-3.
 """
 from dataclasses import dataclass
 
+import numpy as np
+
+from core.params import KB, Q, Material
+
 
 @dataclass
 class MaterialProperties:
@@ -101,3 +105,72 @@ class AlloyMaterial:
             varshni_alpha_eV_per_K=mix("varshni_alpha_eV_per_K"),
             varshni_beta_K=mix("varshni_beta_K"),
         )
+
+
+# ---- Temperature-dependent property formulas ----
+# T=300.0 (K) below is the reference temperature every MaterialProperties
+# entry's *_300K fields are quoted at, not a magic number.
+_T_REF = 300.0
+
+
+def eg_at_T(props: MaterialProperties, T: float) -> float:
+    """Varshni equation, Eg(T) = Eg(0) - alpha*T^2/(T+beta), re-based so it
+    returns exactly Eg_eV_300K at T=_T_REF without needing a separate Eg(0)
+    field:
+        Eg(T) = Eg_eV_300K - alpha*(T^2/(T+beta) - _T_REF^2/(_T_REF+beta))
+    Materials with no Varshni fit (insulators, metals) hold Eg flat at
+    Eg_eV_300K - there's no scaling data to apply.
+    """
+    if props.Eg_eV_300K is None:
+        return None
+    if props.varshni_alpha_eV_per_K is None or props.varshni_beta_K is None:
+        return props.Eg_eV_300K
+    a, b = props.varshni_alpha_eV_per_K, props.varshni_beta_K
+    shift = a * (T ** 2 / (T + b) - _T_REF ** 2 / (_T_REF + b))
+    return props.Eg_eV_300K - shift
+
+
+def nc_at_T(props: MaterialProperties, T: float) -> float:
+    """Effective conduction-band DOS, Nc(T) = Nc_300K * (T/300)^1.5."""
+    if props.Nc_300K is None:
+        return None
+    return props.Nc_300K * (T / _T_REF) ** 1.5
+
+
+def nv_at_T(props: MaterialProperties, T: float) -> float:
+    """Effective valence-band DOS, Nv(T) = Nv_300K * (T/300)^1.5."""
+    if props.Nv_300K is None:
+        return None
+    return props.Nv_300K * (T / _T_REF) ** 1.5
+
+
+def ni_at_T(props: MaterialProperties, T: float) -> float:
+    """Intrinsic carrier concentration, ni(T) = sqrt(Nc(T)*Nv(T)) *
+    exp(-Eg(T) / (2*Vt(T))), the standard Boltzmann-statistics formula."""
+    nc, nv, eg = nc_at_T(props, T), nv_at_T(props, T), eg_at_T(props, T)
+    if nc is None or nv is None or eg is None:
+        raise ValueError(
+            f"ni_at_T requires Nc_300K, Nv_300K, and Eg_eV_300K on {props.name!r}"
+        )
+    Vt = KB * T / Q
+    return (nc * nv) ** 0.5 * np.exp(-eg / (2 * Vt))
+
+
+def resolve_material(props: MaterialProperties, T: float = 300.0) -> Material:
+    """Bridge from a catalog entry to a live, solver-ready core.params.Material
+    with every T-dependent field actually computed at T (ni, Eg, Nc, Nv);
+    mu_n/mu_p/tau_n/tau_p carry straight through unchanged (constant-mobility
+    model, no T-dependence implemented for those yet)."""
+    return Material(
+        T=T,
+        eps_r=props.eps_r,
+        ni=ni_at_T(props, T),
+        mu_n=props.mu_n,
+        mu_p=props.mu_p,
+        tau_n=props.tau_n,
+        tau_p=props.tau_p,
+        chi_eV=props.chi_eV,
+        Eg_eV=eg_at_T(props, T),
+        Nc=nc_at_T(props, T),
+        Nv=nv_at_T(props, T),
+    )
