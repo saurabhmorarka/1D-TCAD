@@ -41,6 +41,8 @@ import warnings
 
 import numpy as np
 
+from jacobian_scaling import equilibrated_spsolve
+
 
 def bank_rose_solve(U0, residual_and_jacobian_fn, residual_only_fn,
                      f_tol=1e-9, maxiter=50, K0=0.0, delta=0.5,
@@ -61,9 +63,15 @@ def bank_rose_solve(U0, residual_and_jacobian_fn, residual_only_fn,
         algorithm's own K-adaptation targets stays sane).
 
     Returns (U, res_norm, it, K).
-    """
-    import scipy.sparse.linalg as spla
 
+    Every linear solve here goes through equilibrated_spsolve
+    (jacobian_scaling.py) rather than a plain spsolve - a numerically exact
+    preconditioning step (see that module's docstring) needed because this
+    solver's caller (newton_solver_avalanche.py) can hand it Jacobians
+    spanning ~29 orders of magnitude between entries, which silently
+    degrades a plain direct solve's accuracy on the small-magnitude,
+    physically meaningful part of the correction.
+    """
     U = U0.copy()
     F, J = residual_and_jacobian_fn(U)
     res_norm = float(np.max(np.abs(F)))
@@ -73,7 +81,7 @@ def bank_rose_solve(U0, residual_and_jacobian_fn, residual_only_fn,
     if res_norm < f_tol:
         return U, res_norm, it, K
 
-    g = spla.spsolve(J, -F)
+    g = equilibrated_spsolve(J, -F)
     if step_clip_fn is not None:
         g = step_clip_fn(g)
     g_norm = float(np.max(np.abs(g)))
@@ -97,7 +105,7 @@ def bank_rose_solve(U0, residual_and_jacobian_fn, residual_only_fn,
                     break
                 continue
 
-            g_try = spla.spsolve(J_try, -F_try)
+            g_try = equilibrated_spsolve(J_try, -F_try)
             if step_clip_fn is not None:
                 g_try = step_clip_fn(g_try)
             g_try_norm = float(np.max(np.abs(g_try)))

@@ -30,6 +30,17 @@ def _debye_length(mat: Material, N: float) -> float:
     return (mat.eps * mat.Vt / (Q * N)) ** 0.5
 
 
+def _interface_concentration(profile: DopingProfile) -> float:
+    """Doping right at the region's interface (depth=0) - see
+    build_diode_grid's h_min comment for why this, not
+    reference_concentration(), is what h_min must be sized from. The
+    thickness argument to sample() doesn't matter here: at depth=0 every
+    profile type evaluates to its depth=0 value regardless of thickness
+    (a linear ramp's frac=0/thickness=0 either way), so a placeholder is
+    fine - this runs before the region's actual thickness is resolved."""
+    return float(profile.sample(np.array([0.0]), 1.0)[0])
+
+
 def _one_sided_nodes(length: float, h_min: float, h_max: float, growth: float) -> np.ndarray:
     """Spacings starting at h_min, growing geometrically to h_max, then constant,
     covering total distance `length`. Returns cumulative node positions (0..length),
@@ -139,8 +150,19 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
     p_profile = dev.p_profile if dev.p_profile is not None else DopingProfile.flat(dev.Na)
     n_profile = dev.n_profile if dev.n_profile is not None else DopingProfile.flat(dev.Nd)
 
-    L_D_p = _debye_length(mat, p_profile.reference_concentration())
-    L_D_n = _debye_length(mat, n_profile.reference_concentration())
+    # h_min resolves the JUNCTION - it must be sized from the doping right
+    # AT the interface (depth=0), not reference_concentration()'s
+    # region-wide summary. Identical for a flat profile (sample(0) ==
+    # concentration_cm3 == reference_concentration()), so every existing
+    # flat-doping example is bit-for-bit unchanged; this only matters once
+    # a graded profile makes the interface value genuinely different from
+    # the region's other summary (e.g. a "linear" profile with
+    # transition_um grading a light doping at the junction into a much
+    # heavier one further out for low contact resistance - see
+    # doping_profiles.py). Using the region-wide summary there would size
+    # h_min off doping the mesh's finest cells never actually sit at.
+    L_D_p = _debye_length(mat, _interface_concentration(p_profile))
+    L_D_n = _debye_length(mat, _interface_concentration(n_profile))
     L_D_min = min(L_D_p, L_D_n)
 
     # h_min (right at the junction) is shared, tied to the SHORTER Debye

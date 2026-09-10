@@ -40,6 +40,19 @@ material:
 mesh:
   growth: 1.06
   bulk_spacing_debye_factor: 5.0
+  # Tried loosening this from 0.05 to see if the avalanche runaway survives
+  # a mesh affordable in 2D/3D - it does not, and the failure is a sharp
+  # cliff, not a graceful accuracy loss: even 0.08 (barely coarser, h_min
+  # 0.10nm vs 0.06nm) makes the ENTIRE fine-tail runaway vanish (M(Va) stays
+  # pinned at 1.00 all the way to -13.93V, where the fine mesh gives
+  # M~118). This is not a Newton convergence failure (self-consistency
+  # looks fine at the coarser settings) - it is the discretized avalanche
+  # feedback itself losing its runaway branch once the peak-field region is
+  # under-resolved, even though the classic Debye-length transport
+  # criterion (which 0.08-0.2 still satisfy, 5-12 cells/Debye length) says
+  # the mesh should be adequate for ordinary transport. See
+  # DEVELOPMENT_LOG.md for the full sweep of factors tried and why this
+  # example keeps 0.05 rather than the looser value once planned here.
   junction_spacing_debye_factor: 0.05
 
 avalanche:

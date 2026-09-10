@@ -156,6 +156,24 @@ def main():
     # plotted curves only - the raw numbers, self-consistency included, are
     # still in breakdown_iv.csv for anyone who wants to look at exactly
     # which points were dropped and why.
+    #
+    # This is deliberately the ONLY masking criterion here - an earlier
+    # version of this code also flagged points whose |I| dipped or spiked
+    # relative to both neighbors, which "worked" empirically but was purely
+    # a symptom-side heuristic with no connection to why a point goes bad.
+    # The real mechanism (traced with an instrumented Jacobian/line-search
+    # check, not guessed) is that the avalanche generation term's Jacobian
+    # entries reach ~1e31 at this device's sub-angstrom junction mesh
+    # spacing, next to ~1e2-scale residual entries - a severely ill-scaled
+    # linear system that can defeat the direct solver's effective precision
+    # at specific bias points, stalling Newton; the equilibrium-reset
+    # fallback then accepts whichever candidate has the lower RAW residual
+    # with no check that it's the same physical branch, silently swapping
+    # in the no-avalanche trivial solution. self-consistency (this solver's
+    # own convergence diagnostic) is what actually flags that failure mode,
+    # so it stays the only filter; the durable fix is Jacobian
+    # scaling/equilibration around the avalanche coupling terms (see
+    # DEVELOPMENT_LOG.md), not a sharper output-side heuristic.
     bad_sc_threshold = 5.0
     good = Jres_aval[rev_mask] <= bad_sc_threshold
     n_masked = int(np.sum(~good))

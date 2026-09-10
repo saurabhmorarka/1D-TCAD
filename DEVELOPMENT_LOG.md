@@ -1491,3 +1491,138 @@ continuation recovers from (it isn't carried forward), and one such
 point was creating a distracting, misleading spike in the plot. The raw
 numbers (self-consistency included) stay in `breakdown_iv.csv`
 regardless, so nothing is hidden, just not misleadingly plotted.
+
+### 16.8 Two real numerics bugs found and fixed; one dead end (mesh
+loosening) fully characterized; a graded-doping idea explored; a
+sub-stepping attempt tried and reverted; the actual fix identified
+
+User pushback on the 5.0-self-consistency mask ("this glitch detector is
+very hacky .. why did it even create the wrong solution to begin with")
+led to real debugging instead of a sharper heuristic - the right call:
+several isolated bias points were landing EXACTLY on the no-avalanche
+current (bit-identical), the signature of `_safe_gummel_retry`'s
+equilibrium-reset fallback winning over the correct continuation branch
+just because it scored a lower raw Newton residual, with no check that
+it's the same physical branch.
+
+**Bug 1, real and fixed**: `_clip()` (both damping paths) was clipping
+`psi`/`phin`/`phip` corrections component-by-component. `J*delta=-F`
+only guarantees `delta` is a descent direction for `||F||^2` as a whole,
+undamped vector - a per-component-clipped vector is a DIFFERENT direction
+with no such guarantee, and near breakdown the raw correction can span
+orders of magnitude between components (a near-zero-density node's QF
+potential barely constrained, next to a well-determined one), exactly
+where this bites hardest. Fixed to a single global scalar rescale of the
+whole vector (preserves direction, only shortens it) - verified via
+instrumentation: the corrupted-direction line search burned all 20
+backtracking halvings finding zero decrease; after the fix, iteration
+counts and self-consistency improved substantially across most of the
+sweep.
+
+**Bug 2, real and fixed**: even with direction preserved, some points
+still stalled. Traced one directly: the Jacobian's avalanche-coupling
+entries reach ~1e31 at this project's sub-nanometer junction mesh
+(`alpha(E) * mobility * carrier_density / h`, each factor legitimate, the
+product isn't), next to ~1e2-scale residual entries - a ~29-order
+spread in one linear solve that erodes double precision's ~16 digits on
+the physically meaningful small part of the answer. New
+`jacobian_scaling.py` (`equilibrated_spsolve`) does Ruiz row/column
+equilibration before every sparse solve in the avalanche path
+(`bank_rose_damping.py` and `newton_solver_avalanche.py`'s line-search
+fallback) - mathematically exact (recoverable), just better-conditioned
+arithmetic. Verified two ways: a synthetic badly-scaled linear system
+went from 8.8e-12 to 1.8e-16 relative residual (50,000x), and the tuned
+flat-1e19 fine_tail sweep's masked-point count dropped 15->10.
+
+**A methodology bug of my own, caught and corrected**: an early "the fix
+works!" result on the hardest point turned out to be because I'd typed
+`-13.876` as a literal in a test script instead of using the actual
+`np.arange`-produced array value (`-13.875999999999992`, ~8e-15 away).
+This device is sensitive enough at that specific point that the
+difference changed which branch Newton landed on - a real, if extreme,
+illustration of how close to a fold some of these points sit. Re-tested
+with the exact array value throughout after catching this.
+
+**Mesh loosening, tried per a direct request ("we can't afford this mesh
+in 2D/3D"), fully characterized as a dead end for this physics**: loosening
+`junction_spacing_debye_factor` from 0.05 even slightly (to 0.08 - still
+"textbook adequate", 5+ cells/Debye length) makes the ENTIRE avalanche
+runaway vanish numerically (M(Va) pinned at 1.00 deep into reverse bias
+where the fine mesh gives M~118), with no warning - Newton's own
+diagnostics look fine throughout. Confirmed the peak field itself is
+still well-resolved at moderate bias (matches the fine mesh to 4 sig
+figs) - it's specifically that avalanche generation's box-integration
+needs the fine mesh in a way ordinary transport doesn't. Real implication
+for future 2D/3D work: uniform mesh loosening isn't viable for this
+physics; would need local/adaptive refinement tracking wherever the peak
+field actually is, not a global density knob. `input_diode_breakdown.yaml`
+kept at 0.05 with a comment explaining why.
+
+**Graded p-side doping, explored, informative but not a fix on its
+own**: tried grading the heavy side from 1e18 at the junction interface up
+to 1e21 over a short transition distance, so `h_min` (now correctly sized
+from the INTERFACE doping rather than a region-wide summary - a genuine,
+separate mesh.py fix, see below) stays coarse while still reaching 1e21
+doping further out. A straight linear-in-concentration ramp badly
+front-loads the change (jumps most of the way to 1e21 within the first ~2%
+of the transition, since the ramp is dominated by whichever endpoint has
+the larger magnitude) and made convergence WORSE (94% masked). A
+log-ramp (`doping_profiles.py`'s new `log_ramp` option - linear in
+log10(concentration) instead) fixed that specific problem (16% masked,
+better than the flat-1e19 baseline) but exposed a DIFFERENT failure: the
+avalanche generation feedback loop simply never ignites, even though the
+resolved peak field and closed-form ionization integral are nearly
+identical to the flat-1e19 device at matching bias (both cross the
+Selberherr threshold ~-13V) - confirmed this is a solver limitation, not
+real physics, by comparing the two devices' numerically-resolved fields
+directly. `mesh.py`'s `h_min` now derives from `p_profile.sample(0.0,...)`
+(the interface value) instead of `reference_concentration()` (a region-wide
+summary) - correct in general, not just for this experiment, and doesn't
+change any existing flat-doping example (verified bit-for-bit via the
+golden tests). `doping_profiles.py` gained `transition_um` (bound a
+`linear` profile's ramp to less than the full region thickness) and
+`log_ramp` (ramp in log-concentration) - both backward compatible,
+opt-in, no effect unless set.
+
+**Adaptive bias-step subdivision (sub-stepping), implemented, measured,
+and REVERTED**: hypothesis was that the remaining failures were caused by
+too-large a jump between consecutive continuation points - added
+`_continuation_with_substeps()` to `newton_solver_avalanche.py` to bisect
+the Va interval and retry from a closer warm start (up to 4 levels deep)
+before falling back to `_safe_gummel_retry`. Measurement (using the
+correct array Va values, per the methodology bug above) showed ZERO
+benefit on the production sweep (still 10/153 masked, same as
+equilibration alone) and ZERO benefit on the broader 1e18-1e21 doping
+sweep (1e19: 120->123, 1e20/1e21: no change, still ~97-100% failed) -
+while multiplying wall-clock time severalfold on every failing point
+(up to 5 nested Newton solves instead of 1), confirmed directly by the
+user noticing the doping sweep had gone from ~2-3 minutes to not
+finishing a single doping level in over 2 minutes. Verbose tracing showed
+why it doesn't help: at EVERY recursion depth, down to 1/16th of the
+original step, the very first Newton iteration achieves ZERO residual
+improvement at ANY step size - not a step-size-dependent stall, a
+persistent local pathology. Reverted cleanly (confirmed no dangling
+references, testsuite passes, runtime back to baseline ~11s). The
+mechanism itself isn't wrong - it would help a genuinely oversized
+user-supplied Va jump - it just isn't what's failing in this device.
+
+**The actual diagnosis, and the planned real fix**: "zero progress at any
+step size" is the textbook signature of sitting at or very near a genuine
+FOLD POINT in the true I(Va) curve, where `∂F/∂U` at fixed Va is singular
+or near-singular - not fixable by better linear-solve precision, a
+different damping strategy (verified directly: Bank-Rose does WORSE on
+the same point, its K parameter maxing out immediately), or a smaller
+step, because the "fix Va, solve for U" formulation is ill-posed exactly
+there. This also explains why 1e20/1e21 (smaller, harder-to-resolve
+depletion regions) fail almost completely - the fold sits somewhere the
+voltage-controlled sweep can't get near. Researched established
+alternatives (see plan file / next session): PSEUDO ARC-LENGTH
+CONTINUATION (Keller) is the standard technique for tracking a solution
+curve through a fold - `Va` becomes an additional unknown solved for
+alongside `[psi, phin, phip]`, and the sweep steps along arc length
+(always well-defined) instead of along Va (not, at a fold). A genuinely
+different paradigm from anything tried this session, not another Newton
+solver tuning knob. Scoped as a new, additive `arclength_continuation.py`
+module plus a new `main_avalanche_arclength.py` driver, fully opt-in -
+see the approved plan (saved separately) for the full design before
+implementation begins on a new branch.

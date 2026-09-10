@@ -54,13 +54,13 @@ import warnings
 
 import numpy as np
 import scipy.sparse as sp
-import scipy.sparse.linalg as spla
 
 from params import Q, Material
 import physics as ph
 from solver import contact_values
 from avalanche import AvalancheModel, ionization_coeffs
 from bank_rose_damping import bank_rose_solve
+from jacobian_scaling import equilibrated_spsolve
 
 
 def _poisson_scale(mat: Material, h_typ: float) -> float:
@@ -441,26 +441,56 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
         base = qf_solve(x, Cdop, mat, Va, psi_eq, n_eq, p_eq, maxiter=maxiter)
         return base["psi"].copy(), base["phin"].copy(), base["phip"].copy()
 
+    _MAX_PSI_STEP = 1.0
+
     def _clip(delta):
-        delta = delta.copy()
-        # Cap the raw psi step too, not just phin/phip's existing
-        # _MAX_QF_STEP cap. Unlike newton_solver_qf.py (no generation
-        # feedback), the avalanche system's psi-psi Jacobian block can
-        # become locally very stiff once G_ii's exponential field
-        # dependence is strong, letting a single unclipped Newton
-        # correction swing psi by tens of volts in one step - enough to
-        # jump clean over the physical (low-current) solution branch onto
-        # a spurious one (caught via a continuation sweep whose reported
-        # current jumped ~11 orders of magnitude in under 1V of bias and
-        # then froze at an unchanging, Va-independent value for every
-        # subsequent point - the signature of Newton landing on a
-        # different, non-physical root rather than failing to converge).
-        # 1V is a tight but still generous cap relative to the smooth
-        # per-bias-point psi changes seen once this is in effect.
-        _MAX_PSI_STEP = 1.0
-        delta[:N] = np.clip(delta[:N], -_MAX_PSI_STEP, _MAX_PSI_STEP)
-        delta[N:3 * N] = np.clip(delta[N:3 * N], -_MAX_QF_STEP, _MAX_QF_STEP)
-        return delta
+        # Cap the step's WORST-OFFENDING component (psi against
+        # _MAX_PSI_STEP, phin/phip against _MAX_QF_STEP) by rescaling the
+        # ENTIRE delta vector by one global scalar, rather than clipping
+        # each component independently.
+        #
+        # Component-wise clipping was the ORIGINAL implementation here, and
+        # it is the actual root cause of the isolated wrong-branch points
+        # this device's sweep used to show (see main_avalanche.py's git
+        # history / DEVELOPMENT_LOG.md for the symptom: isolated bias
+        # points landing exactly on the no-avalanche current, surrounded by
+        # correctly-converging neighbors). The mechanism: J(U)*delta=-F(U)
+        # only guarantees delta is a DESCENT direction for ||F||^2 as a
+        # whole, undamped vector - that guarantee (what makes backtracking
+        # line search work at all) holds for any UNIFORM scalar multiple of
+        # delta, but not for a vector that clips some components far more
+        # than others, which is a DIFFERENT direction with no such
+        # guarantee. Near breakdown, the raw Newton correction can have
+        # components spanning many orders of magnitude (a near-zero-density
+        # node's quasi-Fermi potential barely constrained by the residual,
+        # next to a node with a huge, well-determined correction) - exactly
+        # where component-wise clipping distorts the direction the most.
+        # Caught by instrumenting a specific failing bias point: the
+        # continuation attempt's first Newton step (undamped, step=1) made
+        # a huge, correct-looking residual improvement, but the very next
+        # iteration's clipped direction was not a descent direction at all
+        # (line search had to shrink the step by a factor of ~2^-20, i.e.
+        # effectively zero, before finding ANY decrease) - the classic
+        # signature of a corrupted search direction, not genuine
+        # ill-conditioning. That stall then triggered this solver's
+        # equilibrium-reset fallback (_safe_gummel_retry), which - starting
+        # cold with no avalanche generation feedback at all - converges
+        # cleanly to the trivial, no-generation root instead, and gets
+        # accepted since it scores a lower raw residual (see
+        # newton_gummel_solve's fallback-selection logic below): a
+        # perfectly self-consistent but PHYSICALLY WRONG single bias point,
+        # which is what showed up as a kink in the I(Va) curve.
+        #
+        # A uniform rescale preserves the true Newton direction exactly
+        # (only shortens it), which is exactly what Bank & Rose's own
+        # scalar damping t_k already assumes step_clip_fn provides (see
+        # bank_rose_damping.py) - this makes both damping strategies here
+        # consistent with that same assumption instead of just the
+        # Bank-Rose path benefiting from it.
+        max_psi = np.max(np.abs(delta[:N])) if N else 0.0
+        max_qf = np.max(np.abs(delta[N:3 * N])) if 2 * N else 0.0
+        scale = max(max_psi / _MAX_PSI_STEP, max_qf / _MAX_QF_STEP, 1.0)
+        return delta / scale if scale > 1.0 else delta
 
     def _run_newton(psi0, phin0, phip0):
         psi0 = psi0.copy(); phin0 = phin0.copy(); phip0 = phip0.copy()
@@ -489,7 +519,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
         for it in range(1, maxiter + 1):
             if res_norm < f_tol:
                 break
-            delta = _clip(spla.spsolve(J, -F))
+            delta = _clip(equilibrated_spsolve(J, -F))
             step = 1.0
             for _ in range(20):
                 U_try = U + step * delta
@@ -538,6 +568,22 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                 print(f"  Gummel-restart fallback itself raised ({e!r}) - ignoring, keeping prior candidate")
             return None, np.inf, 0, None
 
+    # An adaptive bias-step subdivision scheme (retry a too-large Va jump by
+    # first converging an intermediate half-step, recursing further if
+    # needed) was tried here and REMOVED after measurement: on this
+    # device's actual failures, the very first Newton iteration at EVERY
+    # recursion depth - down to 1/16th of the original step - achieved
+    # ZERO residual improvement at any step size, showing the blocker
+    # isn't the SIZE of the Va jump (which subdivision targets) but a
+    # local pathology at that specific state that persists regardless of
+    # how small a step is taken. Subdivision therefore bought nothing here
+    # while multiplying runtime severalfold on every failing point
+    # (up to 5 full nested Newton solves instead of 1). The mechanism is
+    # still worth keeping in mind for a genuinely different failure mode -
+    # a user-supplied Va_list with an actually oversized jump between
+    # consecutive points (e.g. a hand-edited sweep skipping straight from
+    # -1V to -13V) - just not for what's failing in this device/mesh
+    # today; see DEVELOPMENT_LOG.md if resurrecting it.
     if psi_init is None:
         U, res_norm, it, _ = _safe_gummel_retry()
     else:
