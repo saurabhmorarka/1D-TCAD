@@ -1,0 +1,47 @@
+# Demo config for material inheritance/derivation: defines "Si1", a
+# one-off silicon variant with longer SRH lifetimes, derived inline from
+# the database's "Silicon" entry without editing core/material_db.py.
+#
+# Exercises material.derive_from/material.overrides (core/config.py ->
+# core.material_db.derive) - see testsuite/test_material_inheritance.py
+# for the underlying unit tests.
+
+doping:
+  p_side:
+    type: flat
+    concentration_cm3: 1.0e17
+  n_side:
+    type: flat
+    concentration_cm3: 1.0e16
+
+thickness:
+  Wp_um: null
+  Wn_um: null
+
+material:
+  name: Si1
+  derive_from: Silicon
+  T_K: 300.0
+  overrides:
+    tau_n_ns: 5.0   # 5x the base Silicon entry's 1.0 ns SRH lifetimes
+    tau_p_ns: 5.0
+
+mesh:
+  growth: 1.06
+  bulk_spacing_debye_factor: 5.0
+  junction_spacing_debye_factor: 0.05
+
+voltage_sweep:
+  reverse_start_V: -2.0
+  reverse_stop_V: -0.05
+  reverse_points: 10
+  forward_start_V: 0.0
+  forward_stop_V: 0.65
+  forward_points: 27
+
+solver:
+  math_model: newton_qf
+
+output:
+  save_bias_points: "last"
+  structure_file: diode_si1_structure.json
