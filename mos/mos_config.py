@@ -26,6 +26,20 @@ def build_from_config(cfg: dict):
     mat = Material()
     dev = MOSDevice()
 
+    material = cfg.get("material") or {}
+    if material.get("name") is not None:
+        from core import material_db
+        from core.materials import resolve_material
+        mat = resolve_material(material_db.get(material["name"]), float(material.get("T_K", 300.0)))
+    elif material.get("T_K") is not None:
+        raise ValueError(
+            "material.T_K requires material.name (no material identity to "
+            "apply its temperature-dependent formulas to)")
+    if material.get("eps_r") is not None:
+        mat.eps_r = float(material["eps_r"])
+    if material.get("ni_cm3") is not None:
+        mat.ni = float(material["ni_cm3"])
+
     sub = cfg.get("substrate") or {}
     polarity = sub.get("polarity", "p")
     if polarity not in ("p", "n"):
