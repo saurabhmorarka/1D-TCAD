@@ -43,7 +43,23 @@ def build_from_config(cfg: dict):
     if material.get("name") is not None:
         from core import material_db
         from core.materials import resolve_material
-        mat = resolve_material(material_db.get(material["name"]), float(material.get("T_K", 300.0)))
+        name = material["name"]
+        if name not in material_db.MATERIALS:
+            derive_from = material.get("derive_from")
+            if not derive_from:
+                raise ValueError(
+                    f"material.name {name!r} is not in the material database; "
+                    f"give material.derive_from to derive it from a known "
+                    f"material (known materials: {sorted(material_db.MATERIALS)})")
+            raw_overrides = material.get("overrides") or {}
+            overrides = {}
+            for key, value in raw_overrides.items():
+                if key.endswith("_ns"):
+                    overrides[key[:-3]] = float(value) * 1.0e-9
+                else:
+                    overrides[key] = float(value)
+            material_db.derive(name, derive_from, **overrides)
+        mat = resolve_material(material_db.get(name), float(material.get("T_K", 300.0)))
     elif material.get("T_K") is not None:
         raise ValueError(
             "material.T_K requires material.name (no material identity to "

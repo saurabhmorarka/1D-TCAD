@@ -10,6 +10,8 @@ floats (poly-Si and idealized-midgap work functions, not real metal
 identities) are intentionally left untouched by this module - they aren't
 catalog entries, and nothing about them changes here.
 """
+import dataclasses
+
 from core.materials import MaterialProperties
 
 MATERIALS: dict = {
@@ -49,3 +51,18 @@ def get(name: str) -> MaterialProperties:
     if name not in MATERIALS:
         raise KeyError(f"Unknown material {name!r}; known materials: {sorted(MATERIALS)}")
     return MATERIALS[name]
+
+
+def derive(name: str, base: str, **overrides) -> MaterialProperties:
+    """Register a new named material by copying `base`'s fields and
+    overriding only the given ones (dataclasses.replace under the hood),
+    e.g. derive("Si1", "Silicon", tau_n=5.0e-9). Promotes this project's
+    existing ad hoc copy.copy(dev)+mutate pattern (mos/mos_poly_sweep.py,
+    mos/mos_main.py, mos/mos_metal_sweep.py) to a named, registry-aware
+    helper - a discrete copy-and-override, distinct from AlloyMaterial's
+    parametric composition mixing (materials.py).
+    """
+    base_props = get(base) if isinstance(base, str) else base
+    derived = dataclasses.replace(base_props, name=name, **overrides)
+    MATERIALS[name] = derived
+    return derived
