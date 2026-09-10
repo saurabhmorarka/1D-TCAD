@@ -46,6 +46,12 @@ class MOSDevice:
                               # determines its work function self-consistently instead).
     eps_ox_r: float = EPS_OX_R
     substrate_profile: DopingProfile = None  # None -> flat at Na (see mesh.build_mos_grid)
+    Qit_cm2: float = 0.0     # fixed interface charge density at the oxide/
+                              # substrate boundary, C/cm^2 (sign as usual:
+                              # +Q for positive/donor-like trapped charge).
+                              # 0.0 preserves exactly today's electrically
+                              # inert interface - see core.interfaces.Interface
+                              # and mesh.build_mos_grid.
 
     # --- Polysilicon (real, depletable) gate, instead of an ideal metal ---
     gate_kind: str = "metal"       # "metal" (ideal Dirichlet contact right at the oxide,

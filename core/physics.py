@@ -101,7 +101,8 @@ def _control_volumes(x: np.ndarray) -> np.ndarray:
 
 def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
                    tol=1e-10, max_iter=100, damping_cap=None,
-                   eps=None, ni=None, n_frozen=None, p_frozen=None):
+                   eps=None, ni=None, n_frozen=None, p_frozen=None,
+                   interfaces=None):
     """Newton solve of the nonlinear Poisson equation for psi(x), given fixed
     quasi-Fermi levels phin(x), phip(x) (both zero at equilibrium).
 
@@ -128,6 +129,13 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
         inversion carrier - pMOS-cap) or p_frozen for an n-type substrate
         (holes are the minority carrier - nMOS-cap); at most one is normally
         given at a time, but both are accepted for generality.
+    interfaces: optional list of core.interfaces.Interface objects, each
+        carrying a fixed areal charge density Qit_cm2 (C/cm^2) localized at
+        one mesh node (e.g. the Si/SiO2 boundary) - added to that node's
+        control-volume-equivalent charge density in the residual (same sign
+        convention as Cdop: positive Qit_cm2 = positive/donor-like charge).
+        None (default) or every interface's Qit_cm2=0.0 leaves the residual
+        bit-identical to not passing this argument at all.
     """
     N = len(x)
     h = np.diff(x)
@@ -137,6 +145,10 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
     ni_arr = np.broadcast_to(mat.ni if ni is None else ni, N)
     n_frozen_mask = np.zeros(N, dtype=bool) if n_frozen is None else ~np.isnan(n_frozen)
     p_frozen_mask = np.zeros(N, dtype=bool) if p_frozen is None else ~np.isnan(p_frozen)
+    Qit_node = np.zeros(N)
+    if interfaces:
+        for iface in interfaces:
+            Qit_node[iface.node_index] += iface.Qit_cm2
 
     hm = h[:-1]   # h_{i-1}, for interior i=1..N-2
     hp = h[1:]    # h_i
@@ -159,8 +171,12 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
 
         dn_dpsi = np.where(n_frozen_mask, 0.0, n / Vt)    # frozen -> no psi-dependence
         dp_dpsi = np.where(p_frozen_mask, 0.0, -p / Vt)   # frozen -> no psi-dependence
+        # Qit_node is already a CHARGE density (C/cm^2, q baked in - unlike
+        # n/p/Cdop, which are number densities that still need the *Q below)
+        # once divided by cvol (cm) it's already C/cm^3, so it's added
+        # directly, not run through another *Q.
         F[1:-1] = (lap_coeff_p * (psi[2:] - psi[1:-1]) - lap_coeff_m * (psi[1:-1] - psi[:-2])) \
-            - Q * (n[1:-1] - p[1:-1] - Cdop[1:-1])
+            - Q * (n[1:-1] - p[1:-1] - Cdop[1:-1]) + Qit_node[1:-1] / cvol
         lower[1:-1] = lap_coeff_m
         upper[1:-1] = lap_coeff_p
         diag[1:-1] = -(lap_coeff_m + lap_coeff_p) - Q * (dn_dpsi[1:-1] - dp_dpsi[1:-1])

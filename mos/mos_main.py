@@ -50,10 +50,19 @@ def main():
         cfg.build_from_config(input_cfg)
     is_p_sub = Cdop_substrate < 0
     is_poly_gate = dev.gate_kind == "poly"
-    # Distinct output subdirectory for the poly-gate example so running both
-    # input_mos.yaml and a poly-gate input in sequence doesn't clobber each
-    # other's plots/CSVs in the shared out/ tree.
-    subdir = "mos_poly" if is_poly_gate else "mos"
+    # Distinct output subdirectory per input file so running several MOS
+    # examples in sequence doesn't clobber each other's plots/CSVs in the
+    # shared out/ tree - same input-filename-derived convention main.py
+    # uses. input_mos.yaml/input_mos_poly.yaml keep their original "mos"/
+    # "mos_poly" subdirs exactly (bit-identical to before); any other input
+    # filename (e.g. input_mos_qit.yaml) gets its own out/mos_<suffix>/.
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    if base == "input_mos":
+        subdir = "mos"
+    elif base == "input_mos_poly":
+        subdir = "mos_poly"
+    else:
+        subdir = base.replace("input_mos_", "mos_").replace("input_mos", "mos")
     OUT = os.path.join(OUT_ROOT, subdir)
     os.makedirs(OUT, exist_ok=True)
     def outp(name):
@@ -106,7 +115,7 @@ def main():
     # ---- C-V sweep ----
     print(f"\nRunning C-V sweep ({len(VG_list)} points, low- and high-frequency per point)...")
     results = cv_sweep(x, Cdop, eps_edge, ni_arr, mat, dev, Cdop_substrate, VG_list, g["oxide_index"],
-                        Cdop_gate=Cdop_gate, gate_oxide_index=gate_oxide_index)
+                        Cdop_gate=Cdop_gate, gate_oxide_index=gate_oxide_index, interfaces=g["interfaces"])
 
     if is_poly_gate:
         psi_bulk_gate = ph.equilibrium_bulk_potential(mat, Cdop_gate)
@@ -213,7 +222,7 @@ def main():
         p_frozen = lf["p"].copy() if not is_p_sub else None
         pert = solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat, dev, Cdop_substrate,
                                       lf["VG"] + dV_illustrate, psi_bulk, psi_init=lf["psi"],
-                                      n_frozen=n_frozen, p_frozen=p_frozen)
+                                      n_frozen=n_frozen, p_frozen=p_frozen, interfaces=g["interfaces"])
         pert["VG"] = lf["VG"]  # label by the base bias point, not the perturbed one
         illustrated.append(pert)
 

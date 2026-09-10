@@ -53,6 +53,8 @@ def build_from_config(cfg: dict):
         dev.t_ox = float(oxide["thickness_nm"]) * 1e-7
     if oxide.get("eps_r") is not None:
         dev.eps_ox_r = float(oxide["eps_r"])
+    if oxide.get("Qit_cm2") is not None:
+        dev.Qit_cm2 = float(oxide["Qit_cm2"])
 
     gate = cfg.get("gate") or {}
     gate_type = gate.get("type", "metal")

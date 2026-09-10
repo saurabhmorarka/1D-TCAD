@@ -46,7 +46,8 @@ def run_one(mat, dev, Cdop_substrate, VG_list, mesh_opts):
     g = build_mos_grid(mat, dev, Cdop_substrate, Cdop_gate=None, **mesh_opts)
     x, Cdop, eps_edge, ni_arr = g["x"], g["Cdop"], g["eps_edge"], g["ni_arr"]
 
-    results = cv_sweep(x, Cdop, eps_edge, ni_arr, mat, dev, Cdop_substrate, VG_list, g["oxide_index"])
+    results = cv_sweep(x, Cdop, eps_edge, ni_arr, mat, dev, Cdop_substrate, VG_list, g["oxide_index"],
+                        interfaces=g["interfaces"])
     VG_arr = np.array([r["VG"] for r in results])
     Cox = man.C_ox(dev)
     C_lf = np.array([r["C_lf"] for r in results]) / Cox
