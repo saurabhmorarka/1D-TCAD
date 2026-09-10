@@ -32,7 +32,8 @@ from mos import mos_analytic as man
 def solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevice,
                            Cdop_substrate, VG, psi_bulk,
                            psi_init=None, n_frozen=None, p_frozen=None,
-                           damping_cap=0.5, max_iter=200, Cdop_gate=None):
+                           damping_cap=0.5, max_iter=200, Cdop_gate=None,
+                           interfaces=None):
     """Single-gate-voltage equilibrium (or quasi-small-signal, if
     n_frozen/p_frozen given) solve. Returns dict with psi, n, p, iters.
 
@@ -91,7 +92,7 @@ def solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevi
     psi, n, p, iters = ph.solve_poisson(
         x, Cdop, mat, phin, phip, psi_guess,
         eps=eps_edge, ni=ni_arr, damping_cap=damping_cap, max_iter=max_iter,
-        n_frozen=n_frozen, p_frozen=p_frozen,
+        n_frozen=n_frozen, p_frozen=p_frozen, interfaces=interfaces,
     )
     # Quasi-Fermi potentials are only meaningful where there are carriers to
     # define them for (ni_arr>0, i.e. the semiconductor) - in the oxide,
@@ -123,7 +124,7 @@ def semiconductor_charge(x, psi, dev: MOSDevice, oxide_index, gate_oxide_index=0
 
 def cv_sweep(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevice,
              Cdop_substrate, VG_list, oxide_index, dV_hf=2e-3,
-             Cdop_gate=None, gate_oxide_index=0):
+             Cdop_gate=None, gate_oxide_index=0, interfaces=None):
     """Low- and high-frequency C-V sweep across VG_list (with continuation
     for robustness/speed). Returns a list of per-point result dicts."""
     psi_bulk = ph.equilibrium_bulk_potential(mat, Cdop_substrate)
@@ -133,7 +134,8 @@ def cv_sweep(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevice,
     psi_prev = None
     for VG in VG_list:
         lf = solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat, dev, Cdop_substrate,
-                                    VG, psi_bulk, psi_init=psi_prev, Cdop_gate=Cdop_gate)
+                                    VG, psi_bulk, psi_init=psi_prev, Cdop_gate=Cdop_gate,
+                                    interfaces=interfaces)
         Qs_lf = semiconductor_charge(x, lf["psi"], dev, oxide_index, gate_oxide_index)
 
         # High-frequency point: freeze the MINORITY carrier (electrons for a
@@ -154,7 +156,8 @@ def cv_sweep(x, Cdop, eps_edge, ni_arr, mat: Material, dev: MOSDevice,
 
         hf_pert = solve_mos_equilibrium(x, Cdop, eps_edge, ni_arr, mat, dev, Cdop_substrate,
                                          VG + dV_hf, psi_bulk, psi_init=lf["psi"],
-                                         n_frozen=n_frozen, p_frozen=p_frozen, Cdop_gate=Cdop_gate)
+                                         n_frozen=n_frozen, p_frozen=p_frozen, Cdop_gate=Cdop_gate,
+                                         interfaces=interfaces)
         Qs_hf_pert = semiconductor_charge(x, hf_pert["psi"], dev, oxide_index, gate_oxide_index)
         # C = dQ_gate/dVG = -dQ_semiconductor/dVG (charge neutrality of the
         # two-terminal capacitor: gate charge is the negative of the

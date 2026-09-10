@@ -23,6 +23,7 @@ import numpy as np
 
 from core.params import Material, Device
 from core.doping_profiles import DopingProfile
+from core.interfaces import Interface
 
 
 def _debye_length(mat: Material, N: float) -> float:
@@ -288,6 +289,11 @@ def build_mos_grid(mat: Material, dev, Cdop_substrate: float,
                    the gate/oxide interface.
       t_si       : substrate thickness actually used
       t_gate     : poly gate thickness actually used (0.0 for a metal gate)
+      interfaces : list of core.interfaces.Interface - the oxide/substrate
+                   boundary (and, for a poly gate, the gate/oxide boundary
+                   too), each carrying dev.Qit_cm2/dev.Qit_gate_cm2 (0.0 by
+                   default, i.e. electrically inert - today's exact
+                   behavior unless a config sets it).
     """
     substrate_profile = (dev.substrate_profile if dev.substrate_profile is not None
                           else DopingProfile.flat(abs(Cdop_substrate)))
@@ -356,6 +362,11 @@ def build_mos_grid(mat: Material, dev, Cdop_substrate: float,
     x_mid = (x[:-1] + x[1:]) / 2.0
     eps_edge = np.where((x_mid >= -dev.t_ox) & (x_mid < 0.0), dev.eps_ox, mat.eps)
 
+    interfaces = [Interface(node_index=oxide_index, material_a="SiO2", material_b="Silicon",
+                             Qit_cm2=getattr(dev, "Qit_cm2", 0.0))]
+    if Cdop_gate is not None:
+        interfaces.append(Interface(node_index=gate_oxide_index, material_a="Silicon", material_b="SiO2"))
+
     return {
         "x": x,
         "Cdop": Cdop,
@@ -369,4 +380,5 @@ def build_mos_grid(mat: Material, dev, Cdop_substrate: float,
         "h_min": h_min,
         "h_max": h_max,
         "substrate_profile": substrate_profile,
+        "interfaces": interfaces,
     }

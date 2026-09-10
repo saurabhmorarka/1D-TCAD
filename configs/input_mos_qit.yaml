@@ -1,0 +1,39 @@
+# Demo config for the interface-mesh feature: same metal-gate MOS
+# capacitor as input_mos.yaml, but with a nonzero fixed interface charge
+# density at the oxide/substrate boundary (oxide.Qit_cm2).
+#
+# Exercises core.interfaces.Interface + the new interfaces= source term in
+# core.physics.solve_poisson (wired through mesh.build_mos_grid and
+# mos.mos_solver.py) - see testsuite/test_interface_charge.py for the exact
+# Gauss's-law verification of the underlying physics.
+
+substrate:
+  polarity: p
+  doping:
+    type: flat
+    concentration_cm3: 1.0e16
+
+oxide:
+  thickness_nm: 1.0
+  eps_r: 3.9
+  Qit_cm2: 1.602176634e-08   # 1e11 cm^-2 fixed positive/donor-like trapped
+                              # charge (Qit_cm2 = N_it * q), a realistic
+                              # order of magnitude for oxide/interface charge
+
+gate:
+  workfunction_eV: null
+
+mesh:
+  n_ox_points: 15
+  growth: 1.08
+  bulk_spacing_debye_factor: 5.0
+  interface_spacing_debye_factor: 0.001
+
+voltage_sweep:
+  start_V: -1.0
+  stop_V: 2.0
+  points: 121
+
+output:
+  save_bias_points: [-0.4, 0.0, 0.3, 0.6, 0.9]
+  structure_file: mos_qit_structure.json

@@ -42,7 +42,8 @@ def run_one(mat, dev, Cdop_substrate, VG_list, mesh_opts, gate_polarity_sign, Ng
     x, Cdop, eps_edge, ni_arr = g["x"], g["Cdop"], g["eps_edge"], g["ni_arr"]
 
     results = cv_sweep(x, Cdop, eps_edge, ni_arr, mat, dev, Cdop_substrate, VG_list,
-                        g["oxide_index"], Cdop_gate=Cdop_gate, gate_oxide_index=g["gate_oxide_index"])
+                        g["oxide_index"], Cdop_gate=Cdop_gate, gate_oxide_index=g["gate_oxide_index"],
+                        interfaces=g["interfaces"])
 
     VG_arr = np.array([r["VG"] for r in results])
     Cox = man.C_ox(dev)
