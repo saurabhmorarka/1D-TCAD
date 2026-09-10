@@ -21,17 +21,17 @@ if TCAD1D_ROOT not in sys.path:
 
 import numpy as np
 
-import config as diode_cfg
-from mesh import build_diode_grid, build_mos_grid
-from solver import voltage_sweep
-import analytic as dan
-import avalanche_config as acfg
+from core import config as diode_cfg
+from core.mesh import build_diode_grid, build_mos_grid
+from core.solver import voltage_sweep
+from core import analytic as dan
+from avalanche import avalanche_config as acfg
 
-import mos_config
-from mos_solver import cv_sweep
-import mos_analytic as man
-import physics as ph
-from doping_profiles import DopingProfile
+from mos import mos_config
+from mos.mos_solver import cv_sweep
+from mos import mos_analytic as man
+from core import physics as ph
+from core.doping_profiles import DopingProfile
 
 POLY_SWEEP_DOPINGS = [1e17, 1e18, 1e19, 1e20, 1e21, 1e22]
 
@@ -81,7 +81,7 @@ def run_diode_breakdown(path=None):
     approximation and avalanche.ionization_coeffs, not on the PDE solve at
     all) - never from inside the sharp runaway itself, so this stays stable
     under the normal golden-comparison tolerance."""
-    path = path or os.path.join(TCAD1D_ROOT, "input_diode_breakdown.yaml")
+    path = path or os.path.join(TCAD1D_ROOT, "configs", "input_diode_breakdown.yaml")
     input_cfg = diode_cfg.load_config(path)
     mat, dev, Va_list, math_model, save_bias_points, mesh_opts, structure_file = \
         diode_cfg.build_from_config(input_cfg)
@@ -145,7 +145,7 @@ def run_mos_metal(path=None):
 
 
 def run_mos_poly_single(path=None):
-    path = path or os.path.join(TCAD1D_ROOT, "input_mos_poly.yaml")
+    path = path or os.path.join(TCAD1D_ROOT, "configs", "input_mos_poly.yaml")
     input_cfg = mos_config.load_config(path)
     mat, dev, Cdop_substrate, VG_list, save_bias_points, mesh_opts, structure_file, Cdop_gate = \
         mos_config.build_from_config(input_cfg)
@@ -186,7 +186,7 @@ def run_mos_poly_single(path=None):
 
 
 def run_mos_poly_sweep(path=None, dopings=POLY_SWEEP_DOPINGS):
-    path = path or os.path.join(TCAD1D_ROOT, "input_mos_poly.yaml")
+    path = path or os.path.join(TCAD1D_ROOT, "configs", "input_mos_poly.yaml")
     input_cfg = mos_config.load_config(path)
     mat, dev, Cdop_substrate, VG_list, save_bias_points, mesh_opts, structure_file, Cdop_gate_cfg = \
         mos_config.build_from_config(input_cfg)

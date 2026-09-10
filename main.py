@@ -21,17 +21,16 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from mesh import build_diode_grid
-from solver import solve_equilibrium, voltage_sweep
-from params import Q
-import analytic as an
-import config as cfg
-import field_save as fsave
-import structure_io as sio
-import plot as tplot
+from core.mesh import build_diode_grid
+from core.solver import solve_equilibrium, voltage_sweep
+from core.params import Q
+from core import analytic as an
+from core import config as cfg
+from core import field_save as fsave
+from core import structure_io as sio
+from core import plot as tplot
 
-OUT = os.path.join(os.path.dirname(__file__), "out")
-os.makedirs(OUT, exist_ok=True)
+OUT_ROOT = os.path.join(os.path.dirname(__file__), "out")
 
 # ---- Color palette (qualitative, colorblind-friendly-ish, consistent across plots) ----
 C_NUM = "#1f6feb"     # numeric simulation - blue
@@ -42,17 +41,19 @@ C_GRID = "#c9c9c9"
 
 def main():
     # Optional CLI arg selects which input YAML to run (default
-    # input_diode.yaml) - e.g. `python3 main.py input_diode_asymmetric.yaml`.
-    # Output filenames are prefixed by the input file's own name (stripped
-    # of the "input_diode_" prefix) for anything other than the default, so
-    # multiple examples' plots/CSVs can coexist in out/ without clobbering
-    # each other - same convention mos_main.py/mos_poly_sweep.py use.
+    # input_diode.yaml) - e.g. `python3 main.py configs/input_diode_asymmetric.yaml`.
+    # Each input file's outputs go to their own out/<subdir>/ (e.g.
+    # out/diode/, out/diode_asymmetric/) so multiple examples' plots/CSVs
+    # can coexist without clobbering each other - same convention
+    # mos_main.py/mos_poly_sweep.py use.
     input_path = sys.argv[1] if len(sys.argv) > 1 else cfg.DEFAULT_PATH
     base = os.path.splitext(os.path.basename(input_path))[0]
-    prefix = "" if base == "input_diode" else base.replace("input_diode_", "").replace("input_diode", "diode") + "_"
+    subdir = "diode" if base == "input_diode" else base.replace("input_diode_", "diode_").replace("input_diode", "diode")
+    OUT = os.path.join(OUT_ROOT, subdir)
+    os.makedirs(OUT, exist_ok=True)
 
     def outp(name):
-        return os.path.join(OUT, prefix + name)
+        return os.path.join(OUT, name)
 
     input_cfg = cfg.load_config(input_path)
     mat, dev, Va_list, math_model, save_bias_points, mesh_opts, structure_file = cfg.build_from_config(input_cfg)
@@ -499,9 +500,9 @@ def main():
                  "04_ideality_factor.png", "05_quasi_fermi_potentials.png", "06_solver_benchmark.png",
                  "07_structure.png", "08_band_diagram.png", "09_charge_density.png", "10_cv_curve.png",
                  "fields_by_bias.csv", "iv_sweep.csv", "cv_sweep.csv", "solver_benchmark.csv"]:
-        print(f"  {prefix}{name}")
+        print(f"  {name}")
     if structure_file:
-        print(f"  {structure_file}  (standalone: python3 plot.py out/{structure_file})")
+        print(f"  {structure_file}  (standalone: python3 core/plot.py out/{subdir}/{structure_file})")
 
 
 if __name__ == "__main__":

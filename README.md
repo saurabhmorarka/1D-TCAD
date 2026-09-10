@@ -6,8 +6,8 @@ capacitor (equilibrium Poisson, C-V). They share the same core Poisson/
 Scharfetter-Gummel machinery (`physics.py`).
 
 <p align="center">
-  <img src="out/03_iv_curve.png" alt="Diode I-V curve" width="49%">
-  <img src="out/01_cv_curve.png" alt="MOS capacitor C-V curve" width="49%">
+  <img src="out/diode/03_iv_curve.png" alt="Diode I-V curve" width="49%">
+  <img src="out/mos/01_cv_curve.png" alt="MOS capacitor C-V curve" width="49%">
 </p>
 
 ## Setup
@@ -25,13 +25,16 @@ python3 main.py                  # or any other script below
 ```
 
 That's the only setup step - every script in this repo (`main.py`,
-`mos_main.py`, `main_avalanche.py`, `mos_poly_sweep.py`,
-`avalanche_diagnostics.py`, `testsuite/test_examples.py`, ...) is then
-runnable directly with `python3 <script>.py` from the repo root, no
-additional configuration, environment variables, or install steps. All
-output (plots, CSVs, structure JSON) is written to `out/`, which already
-exists in the repo with the committed reference outputs - reruns just
-overwrite the files for whichever example you ran.
+`mos/mos_main.py`, `avalanche/main_avalanche.py`, `mos/mos_poly_sweep.py`,
+`avalanche/avalanche_diagnostics.py`, `testsuite/test_examples.py`, ...) is
+then runnable from the repo root, either directly with `python3
+<path>/<script>.py` or (for anything inside the `core`/`mos`/`avalanche`
+packages) as a module with `python3 -m <package>.<script>`, e.g. `python3
+-m mos.mos_main`, no additional configuration, environment variables, or
+install steps. All output (plots, CSVs, structure JSON) is written to
+`out/<example>/` (e.g. `out/diode/`, `out/mos/`), which already exists in
+the repo with the committed reference outputs - reruns just overwrite the
+files for whichever example you ran.
 
 To confirm everything works end to end after installing:
 
@@ -39,7 +42,7 @@ To confirm everything works end to end after installing:
 python3 testsuite/test_examples.py   # should print "OK" - 5 tests, no failures
 ```
 
-## Diode (`main.py`, `input_diode.yaml`)
+## Diode (`main.py`, `configs/input_diode.yaml`)
 
 - Builds a nonuniform 1D mesh across a step p-n junction (sub-nm spacing at
   the junction, geometrically coarsening into the bulk).
@@ -54,7 +57,7 @@ python3 testsuite/test_examples.py   # should print "OK" - 5 tests, no failures
     equations) solved together with an analytic sparse Jacobian and a direct
     sparse solve per step, quadratic convergence (few outer iterations,
     ~4-10x faster wall-clock depending on bias range - see
-    `out/06_solver_benchmark.png`).
+    `out/diode/06_solver_benchmark.png`).
 - Compares against closed-form theory: built-in potential
   `Vbi = Vt*ln(Na*Nd/ni^2)`, the depletion approximation, and the Shockley
   long-base ideal diode law `I = I0*(exp(V/Vt)-1)`.
@@ -87,7 +90,7 @@ python3 main.py
   bias) and relaxes toward n≈1 at higher forward bias (bulk diffusion
   current dominates) — the textbook two-regime diode I-V curve:
 
-  ![Diode I-V curve](out/03_iv_curve.png)
+  ![Diode I-V curve](out/diode/03_iv_curve.png)
 - Reverse leakage current is orders of magnitude above the ideal Shockley
   I0, correctly reflecting depletion-region generation current that the
   simple long-base ideal-diode formula does not model.
@@ -102,12 +105,12 @@ python3 main.py
   or standalone later against just the JSON file, with individual
   curves toggleable:
   ```bash
-  python3 plot.py out/diode_structure.json                          # all three plots, all curves
-  python3 plot.py out/diode_structure.json --which bands --band-fields Ec,Ev,Ef
-  python3 plot.py out/diode_structure.json --interactive               # one window, all fields loaded, click to toggle
+  python3 core/plot.py out/diode/diode_structure.json                     # all three plots, all curves
+  python3 core/plot.py out/diode/diode_structure.json --which bands --band-fields Ec,Ev,Ef
+  python3 core/plot.py out/diode/diode_structure.json --interactive          # one window, all fields loaded, click to toggle
   ```
 
-  ![Diode band diagram](out/08_band_diagram.png)
+  ![Diode band diagram](out/diode/08_band_diagram.png)
 - The coupled Newton solver matches Gummel's current to 4+ significant
   figures at every bias point while using far fewer outer iterations
   (quadratic vs. linear convergence); the speedup grows with how hard the
@@ -123,7 +126,7 @@ the tools don't yet share a single "device stack" description - see
 `mesh.py`'s module docstring for what they do share (the mesh engine
 itself and the doping-profile machinery in `doping_profiles.py`).
 
-## MOS capacitor (`mos_main.py`, `input_mos.yaml`)
+## MOS capacitor (`mos/mos_main.py`, `configs/input_mos.yaml`)
 
 - Builds a mesh across a metal gate - thin oxide - uniform substrate stack
   (either p- or n-type; generic to pMOS-cap or nMOS-cap).
@@ -153,7 +156,7 @@ itself and the doping-profile machinery in `doping_profiles.py`).
   hardcoded.
 
 ```bash
-python3 mos_main.py
+python3 -m mos.mos_main
 ```
 
 ### MOS-cap results
@@ -164,7 +167,7 @@ python3 mos_main.py
   inversion (low-freq rises back toward C_ox as the inversion layer forms
   and can respond; high-freq stays pinned near C_min since it can't):
 
-  ![MOS capacitor C-V curve](out/01_cv_curve.png)
+  ![MOS capacitor C-V curve](out/mos/01_cv_curve.png)
 - In accumulation, the numeric result converges (confirmed via a mesh
   refinement study) to ~0.84 x C_ox rather than the idealized analytic
   C_ox - a real, finite accumulation-layer screening-length effect the
@@ -181,31 +184,31 @@ python3 mos_main.py
   correctly, and the charge-density plot is labeled with the
   accumulation/depletion/inversion regime at each saved gate voltage.
 
-  ![MOS-cap band diagram](out/06_band_diagram.png)
+  ![MOS-cap band diagram](out/mos/06_band_diagram.png)
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `input_diode.yaml` | **Edit this** for the diode: doping (flat/linear/gaussian per side), thickness, mesh knobs, voltage sweep, solver (`math_model: gummel` \| `newton`), which bias points to save fields for |
-| `config.py` | Loads `input_diode.yaml` into `Material`/`Device`/voltage-sweep/solver-choice/mesh overrides |
-| `input_mos.yaml` | **Edit this** for the MOS capacitor: substrate polarity/doping (flat/linear/gaussian), oxide thickness/permittivity, gate work function, mesh knobs, voltage sweep |
-| `mos_config.py` | Loads `input_mos.yaml` into `Material`/`MOSDevice`/voltage-sweep/mesh overrides |
-| `doping_profiles.py` | Shared doping-profile shapes (flat/linear/gaussian) and their sampling/reference-concentration logic, used by both YAML files and both mesh builders |
-| `params.py` | Physical constants and diode material/device parameter defaults |
-| `mos_params.py` | MOS capacitor device parameters (oxide thickness, gate work function, SiO2 permittivity) |
-| `mesh.py` | Shared mesh engine (`build_diode_grid`, `build_mos_grid`): geometric refinement at hard interfaces plus adaptive refinement wherever a graded doping profile changes quickly |
-| `physics.py` | Bernoulli function (+ its derivative), nonlinear Poisson (Newton, generalized to array eps/ni and frozen-carrier modes), Scharfetter-Gummel continuity solves |
-| `analytic.py` | Diode closed-form comparisons (Vbi, depletion width, Shockley law) |
-| `mos_analytic.py` | MOS-cap closed-form comparisons (flat-band/threshold voltage, analytic low-/high-freq C-V) |
-| `solver.py` | Diode equilibrium solve + bias sweep (dispatches to either solver below) |
-| `newton_solver.py` | Diode's fully coupled Newton solve: analytic sparse Jacobian, direct sparse solve, backtracking line search |
-| `mos_solver.py` | MOS-cap equilibrium C-V sweep (low-frequency) and frozen-carrier quasi-small-signal sweep (high-frequency) |
-| `field_save.py` | Shared helper: selecting which bias points to save full field profiles for, quasi-Fermi-potential plotting, field CSV export |
-| `structure_io.py` | Schema + save/load for the `*_structure.json` files each driver writes: device geometry, mesh, doping, and per-bias fields, in one human-readable file `plot.py` (or a future 2D/3D version of this project) can read back |
-| `plot.py` | Structure/band-diagram/charge-density plot library, driven from a loaded structure file. Also runnable standalone against just a `*_structure.json`: `python3 plot.py out/diode_structure.json --interactive` opens one window with every plot and field already loaded, click a checkbox to toggle a curve; `--which`/`--band-fields`/`--charge-fields` narrow down what gets drawn (in either interactive or plain PNG mode) |
-| `main.py` | Diode driver: runs the sweep with both solvers (for the benchmark) plus the one from `input_diode.yaml`, generates plots and CSVs in `out/` |
-| `mos_main.py` | MOS-cap driver: runs the C-V sweep, generates plots and CSVs in `out/` |
+| `configs/input_diode.yaml` | **Edit this** for the diode: doping (flat/linear/gaussian per side), thickness, mesh knobs, voltage sweep, solver (`math_model: gummel` \| `newton`), which bias points to save fields for |
+| `core/config.py` | Loads `configs/input_diode.yaml` into `Material`/`Device`/voltage-sweep/solver-choice/mesh overrides |
+| `configs/input_mos.yaml` | **Edit this** for the MOS capacitor: substrate polarity/doping (flat/linear/gaussian), oxide thickness/permittivity, gate work function, mesh knobs, voltage sweep |
+| `mos/mos_config.py` | Loads `configs/input_mos.yaml` into `Material`/`MOSDevice`/voltage-sweep/mesh overrides |
+| `core/doping_profiles.py` | Shared doping-profile shapes (flat/linear/gaussian) and their sampling/reference-concentration logic, used by both YAML files and both mesh builders |
+| `core/params.py` | Physical constants and diode material/device parameter defaults |
+| `mos/mos_params.py` | MOS capacitor device parameters (oxide thickness, gate work function, SiO2 permittivity) |
+| `core/mesh.py` | Shared mesh engine (`build_diode_grid`, `build_mos_grid`): geometric refinement at hard interfaces plus adaptive refinement wherever a graded doping profile changes quickly |
+| `core/physics.py` | Bernoulli function (+ its derivative), nonlinear Poisson (Newton, generalized to array eps/ni and frozen-carrier modes), Scharfetter-Gummel continuity solves |
+| `core/analytic.py` | Diode closed-form comparisons (Vbi, depletion width, Shockley law) |
+| `mos/mos_analytic.py` | MOS-cap closed-form comparisons (flat-band/threshold voltage, analytic low-/high-freq C-V) |
+| `core/solver.py` | Diode equilibrium solve + bias sweep (dispatches to either solver below) |
+| `core/newton_solver.py` | Diode's fully coupled Newton solve: analytic sparse Jacobian, direct sparse solve, backtracking line search |
+| `mos/mos_solver.py` | MOS-cap equilibrium C-V sweep (low-frequency) and frozen-carrier quasi-small-signal sweep (high-frequency) |
+| `core/field_save.py` | Shared helper: selecting which bias points to save full field profiles for, quasi-Fermi-potential plotting, field CSV export |
+| `core/structure_io.py` | Schema + save/load for the `*_structure.json` files each driver writes: device geometry, mesh, doping, and per-bias fields, in one human-readable file `plot.py` (or a future 2D/3D version of this project) can read back |
+| `core/plot.py` | Structure/band-diagram/charge-density plot library, driven from a loaded structure file. Also runnable standalone against just a `*_structure.json`: `python3 core/plot.py out/diode/diode_structure.json --interactive` opens one window with every plot and field already loaded, click a checkbox to toggle a curve; `--which`/`--band-fields`/`--charge-fields` narrow down what gets drawn (in either interactive or plain PNG mode) |
+| `main.py` | Diode driver: runs the sweep with both solvers (for the benchmark) plus the one from `configs/input_diode.yaml`, generates plots and CSVs in `out/diode/` |
+| `mos/mos_main.py` | MOS-cap driver: runs the C-V sweep, generates plots and CSVs in `out/mos/` (or `out/mos_poly/` for a poly-gate input) |
 
 Requires `numpy`, `scipy`, `matplotlib`, `pyyaml`. Output plots and CSVs are
-written to `out/` (shared between both tools; filenames don't collide).
+written to `out/<example>/` (a separate subfolder per example; filenames don't collide).
