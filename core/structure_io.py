@@ -30,6 +30,12 @@ Schema (schema_version=1, dim=1):
                    "phip": [...]}} - fields are per-node, same length as
                    grid.x_um. NaN (e.g. phin/phip inside an oxide, where
                    they're undefined) is written as JSON null.
+  interfaces     : optional list of {"x_um", "Qit_cm2"} - a fixed sheet
+                   (areal) charge density at a material boundary (see
+                   core/interfaces.py's Interface). Omitted entirely for a
+                   device with none (e.g. the diode) or when every
+                   interface present has Qit_cm2=0.0, so it's not a
+                   schema-breaking addition for any existing doc.
 """
 import json
 
@@ -48,7 +54,8 @@ def _sig_list(arr, ndigits=6):
     return [_sig(v, ndigits) for v in np.asarray(arr, dtype=float).tolist()]
 
 
-def build_structure(*, device, material, regions, x_um, doping_cm3, bias_points, dim=1):
+def build_structure(*, device, material, regions, x_um, doping_cm3, bias_points, dim=1,
+                     interfaces=None):
     """Build the structure+fields doc (pure, no I/O) - see the module
     docstring for the schema. `bias_points` items are {"label", "bias",
     "fields": {...}} with an optional "regime" key, and `regions` items are
@@ -61,7 +68,7 @@ def build_structure(*, device, material, regions, x_um, doping_cm3, bias_points,
     for k, v in material.items():
         material_out[k] = _sig_list(v, 8) if np.ndim(v) > 0 else _sig(v, 8)
 
-    return {
+    doc = {
         "schema_version": SCHEMA_VERSION,
         "dim": dim,
         "device": device,
@@ -79,6 +86,13 @@ def build_structure(*, device, material, regions, x_um, doping_cm3, bias_points,
             for bp in bias_points
         ],
     }
+    nonzero_interfaces = [iface for iface in (interfaces or []) if iface.get("Qit_cm2", 0.0) != 0.0]
+    if nonzero_interfaces:
+        doc["interfaces"] = [
+            {"x_um": _sig(iface["x_um"]), "Qit_cm2": _sig(iface["Qit_cm2"], 8)}
+            for iface in nonzero_interfaces
+        ]
+    return doc
 
 
 def write_structure(path, doc):

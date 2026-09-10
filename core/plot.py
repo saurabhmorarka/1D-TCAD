@@ -215,6 +215,23 @@ def plot_charge(doc, bias_index=0, ax=None, xlim_um=None, fields=None):
     if "net" in fields:
         ax.plot(x_um, net, color="#c2410c", lw=2.2, label="Net charge, (N_D-N_A)+(p-n)")
 
+    # Interface (sheet) charge, e.g. a fixed Si/SiO2 Qit - a genuinely
+    # different quantity (C/cm^2, areal) from the volumetric (cm^-3) traces
+    # above, so it can't share their y-scale as a literal spike; drawn as a
+    # labeled marker/arrow at its location instead, the usual textbook
+    # convention for an interface charge sheet.
+    for iface in doc.get("interfaces", []):
+        y0, y1 = ax.get_ylim()
+        yspan = y1 - y0 if y1 > y0 else 1.0
+        color = "#c2185b"
+        ax.annotate(
+            f"Q$_{{it}}$ = {iface['Qit_cm2']:.3g} C/cm$^2$",
+            xy=(iface["x_um"], y0 + 0.82 * yspan), xytext=(iface["x_um"], y0 + 0.98 * yspan),
+            arrowprops=dict(arrowstyle="-|>", color=color, lw=1.8),
+            ha="center", va="top", fontsize=8, color=color,
+        )
+        ax.axvline(iface["x_um"], color=color, lw=1.0, ls=":", alpha=0.6)
+
     if xlim_um is not None:
         ax.set_xlim(*xlim_um)
     ax.set_xlabel("x (um)")
