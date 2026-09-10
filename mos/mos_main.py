@@ -294,12 +294,16 @@ def main():
                      "x_range_um": [0.0, g["t_si"] * 1e4],
                      "kind": "semiconductor", "doping_type": "p" if is_p_sub else "n"})
 
+    interfaces_out = [{"x_um": x[iface.node_index] * 1e4, "Qit_cm2": iface.Qit_cm2}
+                       for iface in g["interfaces"]]
+
     struct_doc = sio.build_structure(
         device="mos",
         material={"eps_r": mat.eps_r, "ni_cm3": mat.ni, "T": mat.T,
                   "chi_eV": chi_per_node, "Eg_eV": Eg_per_node},
         regions=regions,
         x_um=x_um, doping_cm3=Cdop, bias_points=struct_bias_points,
+        interfaces=interfaces_out,
     )
     if structure_file:
         sio.write_structure(os.path.join(OUT, structure_file), struct_doc)
