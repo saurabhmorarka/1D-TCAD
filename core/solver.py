@@ -139,8 +139,13 @@ def voltage_sweep(x, Cdop, mat: Material, dev: Device, Va_list, verbose=False, m
     impact-ionization generation term and Bank-Rose damping, see
     newton_solver_avalanche.py - a special, opt-in mode for modeling
     avalanche breakdown under high reverse bias; not used by any normal
-    CMOS-flow example) - all four share this same continuation/bookkeeping
-    wrapper so they're directly comparable point-by-point.
+    CMOS-flow example), or "newton_tat" (newton_solver_qf.py's formulation
+    extended with reverse-bias junction leakage - Kane band-to-band
+    tunneling plus Hurkx trap-assisted tunneling, see tat/newton_solver_tat.py
+    and plans/tat_btbt_plan.md - a special, opt-in mode for modeling
+    drain-to-substrate leakage; not used by any normal CMOS-flow example) -
+    all five share this same continuation/bookkeeping wrapper so they're
+    directly comparable point-by-point.
     """
     if method == "gummel":
         solve_fn = gummel_solve
@@ -153,9 +158,13 @@ def voltage_sweep(x, Cdop, mat: Material, dev: Device, Va_list, verbose=False, m
     elif method == "newton_avalanche":
         from avalanche.newton_solver_avalanche import newton_gummel_solve
         solve_fn = newton_gummel_solve
+    elif method == "newton_tat":
+        from tat.newton_solver_tat import newton_gummel_solve
+        solve_fn = newton_gummel_solve
     else:
         raise ValueError(
-            f"method must be 'gummel', 'newton', 'newton_qf', or 'newton_avalanche', got {method!r}")
+            "method must be 'gummel', 'newton', 'newton_qf', 'newton_avalanche', "
+            f"or 'newton_tat', got {method!r}")
 
     psi_eq, n_eq, p_eq, _ = solve_equilibrium(x, Cdop, mat)
 

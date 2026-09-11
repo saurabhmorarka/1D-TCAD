@@ -1626,3 +1626,356 @@ solver tuning knob. Scoped as a new, additive `arclength_continuation.py`
 module plus a new `main_avalanche_arclength.py` driver, fully opt-in -
 see the approved plan (saved separately) for the full design before
 implementation begins on a new branch.
+
+## 17. Session 11: drain-to-substrate junction leakage - trap-assisted and
+band-to-band tunneling, a new `tat/` package, no damping needed after all
+
+Requested capability: model reverse-bias leakage at a MOSFET's drain-to-
+substrate junction (drain ~2e20 cm^-3, substrate ~1e17 cm^-3, opposite
+type - the same doping regime `newton_solver_qf.py` was built for), driven
+by trap states inside the bandgap assisting tunneling - expected to turn on
+at much lower field than avalanche and rise exponentially but more softly.
+Full design in `plans/tat_btbt_plan.md` (branch `tat-btbt-leakage`),
+scoped to silicon only for this phase (SiGe drain material is an explicit,
+deferred follow-on, since its narrower bandgap is expected to make this
+mechanism worse).
+
+**Sources actually consulted, not reconstructed from memory**: FLOOXS
+(open-source TCAD, local clone) has a working `B2BTunnel/simple.tcl` (Kane
+local-field band-to-band tunneling, three field-power variants with real
+fitted coefficients) and a `schenk.tcl` (a more microscopic, phonon-assisted
+trap-coupled model, not yet implemented - planned as a second, swappable
+model once Hurkx is validated). A Sandia National Laboratories conference
+paper (Carroll et al., SAND2007-1497C, fetched and read in full) reproduces
+Hurkx, Klaassen & Knuvers' 1992 trap-assisted-tunneling formula directly -
+confirms the mechanism the task described is a field-enhanced SRH
+recombination/generation rate (`tau -> tau/(1+Gamma(F))`), not pure Zener
+tunneling. `Gamma(F) = Delta*exp(Delta)*E1(Delta)`, `Delta=(F/F_Gamma)^2`
+is the closed form reported consistently across the wider TCAD literature
+for that enhancement factor (lower sourcing confidence than the SRH
+structure itself - the finite-difference Jacobian check, not the citation,
+is what actually gates trust in it). Confirmed via web search that Hurkx is
+one of Sentaurus's four standard local BTBT/TAT models (alongside Kane,
+Schenk, and the more accurate but structurally different nonlocal
+dynamic-path model) - Hurkx was chosen to implement first specifically
+because it degrades EXACTLY onto this project's own already-validated
+`physics.py:srh_recombination` at zero field, reusing parameters
+(`tau_n`, `tau_p`) already in every example, rather than introducing a
+large block of new, uncalibratable knobs.
+
+**New package `tat/`** (mirrors `avalanche/`'s structure): `tat.py`
+(`KaneBTBTModel`, `HurkxTATModel`, `btbt_generation`, `hurkx_gamma`,
+`hurkx_tat_generation`, plus a standalone `sanity_probe()` run via
+`python3 -m tat.tat`), `newton_solver_tat.py` (built on
+`newton_solver_qf.py`, Hurkx's field-enhanced SRH REPLACES the plain SRH
+term already in that solver's continuity rows, Kane's BTBT is purely
+additive - subtracted from the effective recombination rate the same way
+avalanche's `G_ii` is), `tat_config.py`, `main_tat.py`, plus the new
+`configs/input_diode_drain_substrate.yaml` example (exactly the 2e20/1e17
+doping the task specified) and `testsuite/golden/diode_tat.json`.
+Additive-only changes elsewhere: `core/config.py`'s `math_model` allow-list
+and `core/solver.py`'s `voltage_sweep` dispatch both gained `"newton_tat"`;
+`testsuite/common.py` gained `run_diode_tat` + one new `EXAMPLES` entry,
+sampled at moderate reverse bias (-1V, -5V), well clear of any sharp
+transition. Full existing suite (5 examples) still passes byte-for-byte
+unchanged; the new 6th test passes too.
+
+**A real numerical bug caught before it reached the solver**: `tat.py`'s
+first version computed `Gamma(Delta) = Delta*exp(Delta)*E1(Delta)`
+literally, which overflows `exp(Delta)` (well before `scipy.special.exp1`'s
+compensating decay brings the product back down to its true, bounded limit
+of 1) at fields reachable not just at genuinely extreme bias but
+transiently at a rejected Newton line-search trial point. Fixed with the
+standard large-`x` asymptotic expansion of `x*exp(x)*E1(x)` (Abramowitz &
+Stegun 5.1.51) above `Delta=30`, verified to match the exact formula to
+~1e-9 relative error right at the switchover point and to stay accurate
+(by construction) at every larger `Delta` where the exact formula would
+instead overflow to `inf`/`nan`.
+
+**Unlike avalanche, this solver needed NO new damping strategy** - the
+no-feedback argument in `newton_solver_tat.py`'s own module docstring
+(both generation terms depend only on local field and local `n, p`, never
+on `Jn`/`Jp` the way avalanche's `G_ii` does, so there's no self-
+reinforcing loop) held up in practice: a full 0 to -10V reverse sweep on
+the actual drain/substrate device converges with plain backtracking
+Newton, zero warnings, self-consistency ~0.0005-0.001% throughout, in as
+few as 9-13 iterations per point. `bank_rose_damping.py` (already built for
+avalanche) was never needed.
+
+**Finite-difference Jacobian check**: passed at ~1e-5 to 1e-6 relative
+error across forward bias, moderate reverse bias, and -5V reverse bias,
+with two lessons worth keeping for the next such check on this codebase:
+(1) the 6 Dirichlet boundary rows must be EXCLUDED from the comparison -
+their Jacobian diagonal is deliberately rescaled for linear-solve
+conditioning (a pre-existing, unmodified `newton_solver_qf.py` design
+choice, "same pivoting-safety scaling as newton_solver.py") and does not
+match the literal derivative of the coded residual, which is not a bug;
+(2) a single global or per-column significance floor is not enough on a
+Jacobian this unevenly scaled (Poisson-block entries dwarf the new
+TAT-coupling entries) - use a PER-ROW absolute floor (checked directly:
+entries below it were confirmed, via a multi-epsilon convergence check
+down to 1e-9, to be correctly computed but genuinely negligible-magnitude
+sensitivities in the deep quasi-neutral bulk, not real mismatches) plus a
+smaller default perturbation (`1e-7`, not `1e-6`) - both false positives
+this session hit were resolved by tightening these two things, not by
+finding an actual Jacobian error.
+
+**Numeric result** (original 2e20-drain/-10V version of this example,
+since revised - see 17.3/17.4 below for the numbers this project actually
+settled on): leakage current enhancement over a plain no-tunneling
+baseline grew smoothly and monotonically with reverse bias (no runaway,
+no fold, matching the task's own expectation of "still exponential, just
+not as sharp" as avalanche). A per-node generation-term breakdown at the
+deepest sweep point confirmed the physical ordering directly (not just
+via the standalone `tat.py` sanity probe): Hurkx TAT dominates across
+nearly the entire depletion width, with Kane BTBT only overtaking right
+at the single peak-field point (the metallurgical junction itself).
+
+### 17.1 Band diagrams: showing WHY tunneling turns on, not just that it does
+
+User request: add Ec/Ev/Ei/Efn/Efp/vacuum-level band diagrams to the
+validation plots, so the mechanism is visible, not just the resulting
+I(Va) curve. This project already had exactly the right tool
+(`core/plot.py`'s `plot_bands`/`_band_energies`, built for the MOS-cap
+work) - no new plotting code needed, just wiring `main_tat.py` to build a
+`structure_io` doc (equilibrium + swept bias points, same pattern
+`main.py` already uses) and call it. New `tat_bands.png`: band diagram at
+equilibrium, band diagram at the deepest reverse-bias point, and the
+G_tat/G_btbt generation-term profile, all sharing one x-axis zoomed to the
+depletion region.
+
+**A real physics-caption bug caught before shipping**: the first draft's
+caption claimed reverse bias "pulls the drain's E_c down toward the
+substrate's E_v," the classic Esaki/tunnel-diode picture. Checking the
+actual numbers first (a captioning claim is still a physics claim) showed
+this device's substrate (1e17 cm^-3) is not degenerate - its E_f sits well
+inside the gap, not inside a band - so there is no literal band-overlap
+happening the way there is in a true degenerately-doped tunnel diode; the
+drain-side flat region doesn't move at all under bias (it's the grounded
+contact), only the substrate side shifts. What actually changes between
+the equilibrium and reverse-bias panels is the STEEPNESS of the band
+bending across the transition region - the local field, i.e. exactly the
+quantity `tat.py`'s Kane `alpha(F)` and Hurkx `Gamma(F)` depend on.
+Corrected the caption to describe field/slope steepening rather than a
+band-overlap picture that doesn't apply to this doping regime.
+
+### 17.2 Sweep range restricted to -5V, per explicit user direction
+
+User: "we normally don't go beyond that unless dealing with power
+devices." Changed `input_diode_drain_substrate.yaml`'s
+`reverse_stop_V` from -10.0 to -5.0 (`reverse_points` 60->40 to keep
+similar point density) and `save_bias_points` to `[-1,-2,-3,-4,-5]` -
+this is a normal-operation logic/memory-junction leakage example, not a
+power-device breakdown study, so there was never a reason to sweep or
+plot deeper. Golden test re-captured for the new sample points (a range
+change, not a physics regression - values track the same smooth curve,
+just sampled differently).
+
+### 17.3 Drain-doping sweep (1e18-1e21): one-sided-junction confirmation,
+and a real Kane BTBT divergence caught and fixed
+
+User: "skew doping from 1e18-1e21 and see how the model behaves." New
+`tat/main_tat_doping_sweep.py` (mirroring `mos_poly_sweep.py`'s
+"hold everything fixed, override one doping, overlay results" pattern) -
+substrate held at 1e17, drain swept. **A real bug in the sweep script
+itself, caught immediately**: overriding `dev.Nd` alone did nothing - all
+four doping levels gave BIT-IDENTICAL results. Root cause:
+`core.config.build_from_config` already resolves the YAML's doping block
+into a concrete `dev.n_profile` `DopingProfile` object, and
+`core.mesh.build_diode_grid` reads THAT, not `dev.Nd` - exactly the
+pitfall `mos_poly_sweep.py`'s own `run_one()` already works around by
+setting `dev.gate_profile` directly. Fixed by also setting
+`dev.n_profile = DopingProfile.flat(Nd)`.
+
+Once fixed, the sweep confirmed the expected one-sided-junction physics
+DIRECTLY (not just cited from the plan): drain doping 1e18/1e19/1e20 gave
+nearly identical peak field (2.2e5 to 5.7e5 V/cm) and leakage - once the
+drain is already far heavier than the fixed 1e17 substrate, doping it
+further barely narrows the depletion width, which the LIGHT side already
+dominates. But 1e21 blew up 6 orders of magnitude to physically
+nonsensical milliamp-scale current. Traced before reporting it (not
+patched blindly): the plain no-tunneling baseline solver stayed perfectly
+well-behaved at the identical doping/mesh, isolating the cause to the
+tunneling generation term itself, not a solver/Jacobian bug. Root cause:
+1e21's peak field reaches 1.7e6 V/cm (vs 5.7e5 at 1e20), and Kane's
+`A*F^P*exp(-B/F)` has NO saturation built in - `exp(-B/F)` alone would
+plateau near 1, but the unbounded `F^P` prefactor keeps growing forever,
+so a 3x field increase inflated `G_btbt` by 12 orders of magnitude
+(4e16 -> 3e28).
+
+Given a direct choice (add a saturation cap / document the limitation and
+leave unbounded / drop 1e21 from the study), the user chose to add a cap.
+Added `KaneBTBTModel.F_sat_V_cm` (default first tried: 1.5e6, "just above
+where 1e20 diverges" - re-derived after checking the actual numbers: at
+1.5e6, `G_btbt` is already ~4e27, thirty orders of magnitude beyond
+anything this project has ever validated a resulting CURRENT against).
+Settled on **9e5 V/cm** instead - just above the peak field the project's
+own shipped, validated 2e20-drain example reaches (~7.84e5 V/cm) - so
+every doping level's prediction stays anchored to the same order of
+magnitude as the one case actually cross-checked against a no-tunneling
+baseline, rather than extrapolating an exponential arbitrarily far past
+it. Implemented the same hard-floor style `avalanche.py` already uses at
+its own (opposite, low-field) limit - `F` capped before evaluating the
+formula, so `dG/dF` is exactly 0 beyond the cap, not smoothed. Re-verified:
+full testsuite still passes (the shipped 2e20 example's own peak field
+sits below the cap, so it is completely unaffected), and the finite-
+difference Jacobian check still passes at ~1e-5 to 1e-6 on every
+physically realistic bias point tested (a check at Va=+0.3V using a
+crude, deliberately non-self-consistent test perturbation DID show a
+mismatch at one entry, but was proven - by disabling the cap entirely and
+reproducing the identical mismatch - to be a pre-existing artifact of that
+crude test construction hitting a ~1e8 V/cm unphysical field spike, not a
+regression from the cap). With the cap, 1e21's leakage enhancement is a
+bounded, physically believable ~50x at -5V instead of ~1.5 million x.
+
+Also fixed a self-diagnostic bug of my own along the way: the sweep's
+`max_selfconsist` column showed an alarming 2.6e7 at 1e18/1e19 - traced to
+`J_std/J_mean` being evaluated AT Va=0, where `J_mean` is itself ~0 by
+construction (true equilibrium has no net current), making the ratio
+blow up for a reason that has nothing to do with solver quality (only 2
+Newton iterations needed there) - the same documented artifact
+`main_avalanche.py` already works around. Fixed by excluding points
+within 0.2V of equilibrium from that diagnostic.
+
+### 17.4 Substrate-doping sweep (1e16-1e18, drain fixed): the informative
+half of the doping story, plus a genuine ordinary-diode-physics finding
+
+Drain-doping sweep (17.3) showed the heavy side barely matters below
+1e21 - expected for a one-sided junction, but also the LESS interesting
+half of the story, since the LIGHT side is what actually sets the
+depletion width/field. User: hold drain at 1e20, sweep substrate
+1e16/1e17/1e18 instead. New `tat/main_tat_substrate_sweep.py` (same
+pattern/bugfix-awareness as 17.3's script). Result: a much stronger,
+monotonic effect in the expected direction - peak field rises from 5.4e5
+(1e16) to 5.7e5 (1e17) to 8.6e5 V/cm (1e18, no longer negligible next to
+the 1e20 drain - only 100:1 now), and leakage enhancement at -5V reaches
+~11,000x at 1e18 (vs ~1.1-1.4x at 1e16/1e17). Converged everywhere with
+zero warnings.
+
+**User's follow-up question, and a real finding it surfaced**: at shallow
+bias, 1e16 (the LIGHTEST substrate) showed MORE absolute leakage current
+than 1e17, seemingly contradicting "heavier doping -> more field -> more
+leakage." Checked against the pure closed-form `analytic.shockley_I0`
+(zero tunneling physics at all) before answering: `I0(1e16)=2.99e-14 A`,
+`I0(1e17)=2.99e-15 A`, `I0(1e18)=3.01e-16 A` - exactly 10x apart per
+decade, confirming this is ordinary diode physics
+(`I0 ~ ni^2/Na`, minority-carrier injection into the lighter side),
+present even with the tunneling model switched off entirely. Added a
+dedicated, finer 0-to-1V sub-sweep (`tat_substrate_sweep_0to1V.png`,
+30 points, not just a re-plot of the coarser full-range sweep) showing
+this directly: the no-tunneling dashed baselines alone already show
+1e16 > 1e17 across the whole window. The genuinely interesting result is
+the CROSSOVER visible in that same plot: 1e18's tunneling enhancement
+grows fast enough to overtake both lighter dopings' baselines by about
+-0.5V and reach >100x by -1V - i.e. within the practically-relevant
+0-to-1V range most non-power devices actually operate in, you can
+directly watch ordinary diode leakage (favors lighter doping) lose out to
+tunneling enhancement (favors heavier doping/higher field) as bias
+deepens.
+
+**Config consolidated per explicit user direction**: the shipped example
+now standardizes on drain=1e20 (matching what the informative substrate
+sweep was built around, previously 2e20) - `tat/main_tat_doping_sweep.py`
+(the drain sweep, confirmed low-information-value below 1e21) removed;
+`tat/main_tat_substrate_sweep.py` (the informative one) kept. Golden test
+re-captured for the new doping.
+
+**Not done this session, tracked for later** (see `plans/tat_btbt_plan.md`):
+Schenk as a second, swappable trap-assisted model (in progress, next
+session entry); the SiGe drain-side follow-on; and, longer-term, a
+genuine NONLOCAL tunneling-path search once this project extends to 2D/3D
+device geometry (an explicit user roadmap item, not this phase's scope) -
+`tat/tat.py` is kept structured so that can be added as a new module
+alongside it later, not a rewrite.
+
+### 17.5 Schenk model implemented as the planned second trap-assisted
+model; a real ill-conditioning bug found and fixed; self-consistency gap
+honestly left open
+
+Per the plan's own Hurkx-first rationale (17.0), added
+`tat.tat.SchenkTATModel`/`schenk_tat_generation` - the F=E (plain local
+field) special case of FLOOXS's `schenk.tcl`, where the density
+correction collapses exactly to `n, p` themselves. Derived and
+implemented the closed-form derivatives by hand: `SchenkSRH`'s (a
+dimensionless sign/magnitude selector, not itself a rate) derivatives
+simplify cleanly to `dSchenkSRH/dn = ni/(n+ni)^2` (independent of p, and
+symmetric in n/p) after simplifying the general quotient rule - a good
+sign the formula was transcribed correctly. `newton_solver_tat.py`
+generalized to accept a swappable `trap_model`/`trap_generation_fn` pair
+(same call signature for both Hurkx and Schenk) rather than hardcoding
+Hurkx, with the external API kept backward compatible (nothing currently
+threads a trap model through `voltage_sweep` anyway, matching avalanche's
+own precedent noted in 17.0).
+
+**A real FD-Jacobian false alarm, diagnosed rather than silenced**: an
+initial FD check (reusing avalanche's own crude, non-self-consistent
+ramp-perturbation construction) showed ~1-2% mismatches for Schenk but
+not Hurkx. Traced to Schenk's discrete `sign(SchenkSRH)` branch (selects
+which of two phonon absorption/emission `Fc` values to use) landing
+exactly on its own knife-edge: checking the actual numbers showed
+`SchenkSRH` sits at pure floating-point noise (~1e-13 to 1e-26) across
+essentially the ENTIRE quasi-neutral bulk on both sides (335 of 372 nodes
+for this device) - expected physics (mass-action `n*p~ni^2` holds almost
+everywhere except right in the depletion region), but it means a crude
+test construction that leaves the bulk still exactly at equilibrium hits
+a branch that is, at those specific nodes, genuinely undefined by
+floating-point noise. Re-ran the SAME check using a REAL, self-consistent
+converged state (the plain `newton_qf` solution) as the base point
+instead - passed cleanly at ~1e-6 to 1e-7 across forward and reverse
+bias. Lesson for next time: a synthetic ramp perturbation is a fine base
+point for smooth models (worked for Hurkx, Kane, and the original QF
+Jacobian) but a poor one for any model with a discrete branch tied to a
+quantity (like `n*p-ni^2`) that's naturally ~0 almost everywhere in a
+non-self-consistent, still-near-equilibrium test state - use a real
+converged solution as the base point for those.
+
+**A real, more serious ill-conditioning bug, found and fixed**: even past
+the FD-check false alarm, `newton_gummel_solve` with Schenk repeatedly
+diverged or stalled (`|F|` stuck at 1e8-1e12, one point hit "Matrix is
+exactly singular") starting from a perfectly reasonable Gummel warm
+start. Verbose tracing showed the residual barely moving across many
+tiny-step backtracking iterations - the same qualitative signature
+`DEVELOPMENT_LOG.md` session 16 (avalanche, bug 2) diagnosed as severe
+Jacobian ill-conditioning, not a bad search direction. Confirmed directly
+by comparison: Schenk's generation rate spans a FAR wider dynamic range
+than Hurkx's tau-bounded one (its own standalone comparison in `tat.py`'s
+sanity probe already showed this - Schenk stays ~40 orders of magnitude
+below Hurkx at low field, then crosses over and grows far more steeply,
+matching its closer kinship to Kane's un-tau-bounded exponential than to
+Hurkx's saturating `Gamma(F)`). Fix: reuse `core/jacobian_scaling.py`'s
+`equilibrated_spsolve` (already built for avalanche's identical class of
+problem) in place of the plain `scipy.sparse.linalg.spsolve` call -
+applied unconditionally (mathematically exact/recoverable, so no
+downside for Hurkx, confirmed bit-for-bit unchanged on Hurkx's own
+sweep). Verified directly on the single worst-diverging point (Va=-2V):
+un-equilibrated Newton stalled at `|F|~5e8` from a `|F|~1.2e11` cold
+start after 18 iterations; the IDENTICAL Newton sequence with
+equilibration alone reached `|F|~2.2e-5` in 12 clean, full-step
+iterations.
+
+**Left honestly open, not silently shipped as "done"**: even after the
+equilibration fix, Schenk's SELF-CONSISTENCY (`J_std/J_mean`, current
+uniformity across the device in steady state) on this project's mesh is
+visibly worse than Hurkx's (0.1-3 vs. Hurkx's consistent ~1e-5) - this is
+NOT a Newton convergence failure (the residual itself converges tightly,
+often in single-digit iterations, well below `f_tol`), so raising
+`maxiter`/tightening `f_tol` (tried, no effect) doesn't touch it. Working
+hypothesis, not yet confirmed: Schenk's much sharper field dependence may
+need the same kind of extra mesh refinement near the peak field that
+avalanche's own `avalanche_ii_refine` provides for its similarly sharp
+generation term - not yet implemented here. New
+`tat/main_tat_hurkx_vs_schenk.py` produces the requested comparison
+(`out/tat/tat_hurkx_vs_schenk.png`) with this caveat stated directly in
+its own docstring and plot title, not hidden - on this device (1e20
+drain / 1e17 substrate, 0 to -5V), Schenk's absolute contribution is 4-5
+orders of magnitude SMALLER than Hurkx's throughout (expected: this
+device's peak field at these biases stays well below the ~9e5 V/cm range
+where the standalone sanity probe showed Schenk catching up to Hurkx's
+magnitude), so the self-consistency gap doesn't yet visibly corrupt the
+headline comparison, but should be resolved (mesh refinement, most
+likely) before trusting Schenk at higher fields/heavier doping the way
+Hurkx has already been trusted this session.
+
+Full existing testsuite (6/6, including `diode_tat`) still passes
+unchanged throughout all of this - none of it touched the Hurkx default
+path's own already-validated behavior.
