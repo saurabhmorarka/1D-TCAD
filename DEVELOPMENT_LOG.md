@@ -1979,3 +1979,80 @@ Hurkx has already been trusted this session.
 Full existing testsuite (6/6, including `diode_tat`) still passes
 unchanged throughout all of this - none of it touched the Hurkx default
 path's own already-validated behavior.
+
+## 18. Session 12: pre-2D/3D architecture prep - a written architecture
+boundary, a private-API cleanup, and four locked-in future decisions
+
+After Session 11 shipped, a series of architecture questions came up
+(why `core/` isn't `diode/`, whether splitting a `diode/` package out
+would help - answered no, since `mos/` already depends on genuinely
+shared code in `core/mesh.py` and `avalanche/`/`tat/` import
+`newton_solver_qf.py`'s internals in an inheritance-like way that a
+rename wouldn't change) and finally: how to think about architecture
+before the codebase moves into 2D/3D, given the risk of it becoming
+accidentally MOS-centric the way it once became accidentally
+diode-centric before the `core/` rename. Rather than let that stay a
+verbal answer, the user asked for a concrete plan and to start acting on
+it - approved at
+`~/.claude/plans/whimsical-stargazing-barto.md`, with four explicit
+constraints from the user folded in before implementation started:
+avalanche must never be merged into a shared multi-mechanism solver (it's
+numerically finicky and not expected to ever run combined with other
+generation mechanisms, in 1D or later in 2D/3D); 2D/3D visualization will
+need a genuinely different tool (interactive slicing, fields rendered on
+the 3D structure, Tecplot-like) rather than an extension of
+`core/plot.py`; 2D/3D meshing should use a point-cloud approach for
+geometric flexibility rather than extending `core/mesh.py`'s structured
+node-array style; and the longer-term ambition is a general PDE framework
+(user-specified equations/constants/variables, e.g. thermal simulation),
+not a codebase permanently specific to drift-diffusion.
+
+Three things were done this session, all pure prep/cleanup - no physics
+changed, no golden outputs changed:
+
+**New root-level `ARCHITECTURE.md`** records, so none of it has to be
+re-derived from git archaeology again: which of `core/`'s files are
+1D-only and should not be genericized in place (`mesh.py`,
+`newton_solver_qf.py`, `physics.py`'s tridiagonal continuity solves); the
+actual reusable pure-physics kernel (`srh_recombination`,
+`bernoulli`/`bernoulli_deriv`, the TAT/BTBT and avalanche generation-rate
+functions, the `Material`/`Device` dataclasses, `doping_profiles.py`) -
+noting mobility is currently a constant field, not a function, and any
+future mobility model should follow the same pure-function pattern; the
+avalanche-stays-standalone rule; and the package-per-mechanism convention
+(new physics gets its own top-level sibling package, never nested inside
+`mos/`). It also records the four locked-in-but-not-yet-built 2D/3D
+decisions above (visualization, meshing, the pre-existing nonlocal-
+tunneling-path-search roadmap item, and the general-PDE direction), so
+future work doesn't get designed against the wrong assumption.
+
+**Private-API cleanup**: `tat/newton_solver_tat.py` imported four
+underscore-prefixed internals directly from `core/newton_solver_qf.py`
+(`_poisson_scale`, `_continuity_scale`, `_unpack`, `_MAX_QF_STEP`), while
+`avalanche/` never did (it keeps its own private copies instead, by
+design, per the standalone rule above) - two different coupling styles
+for what's meant to be the same kind of relationship. Standardized on one
+public surface: renamed the four to `poisson_row_scale`,
+`continuity_row_scale`, `unpack_qf`, `MAX_QF_STEP` in
+`core/newton_solver_qf.py` (dropping the leading underscore, adding an
+explicit `__all__`), and updated `tat/newton_solver_tat.py`'s import
+accordingly. Rename-only, but not entirely mechanical: several call sites
+in both files assign a same-named local variable from the function call
+(e.g. `poisson_scale = _poisson_scale(...)`) - renaming the function to
+match would have made the local variable shadow it and broken the call,
+so the new public names were deliberately chosen distinct from those
+local variable names to avoid that trap.
+
+**Verification**: full existing test suite (31 tests via
+`python3 -m unittest discover -s testsuite`, since `pytest` isn't
+installed in this project's `.venv` - `unittest discover` is the suite's
+own documented fallback) passes unchanged, including `test_diode`,
+`test_diode_breakdown`, and `test_diode_tat` against their existing
+golden files - confirming the rename touched no behavior.
+
+Explicitly not done this session, by design: no 2D/3D package, mesh
+module, or visualization tool was created - there's no concrete 2D device
+target yet, so that would be speculative scaffolding rather than
+architecture that's actually needed. The next real engineering step
+becomes concrete once a specific 2D device or PDE target is chosen, at
+which point it gets its own fresh plan.
