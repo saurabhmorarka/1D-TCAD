@@ -1,0 +1,91 @@
+# 1D diode simulation input parameters - DRAIN-TO-SUBSTRATE TAT/BTBT LEAKAGE example.
+#
+# Run with: python3 -m tat.main_tat
+#
+# Special, opt-in example (NOT part of a normal CMOS flow): a heavily,
+# degenerately doped drain side (1e20 cm^-3) against a lightly doped
+# substrate (1e17 cm^-3) of opposite type, exactly the regime of a real
+# MOSFET's drain-to-substrate junction. This is the SAME solver formulation
+# (newton_solver_qf.py's quasi-Fermi potentials) already validated at this
+# doping ratio in input_diode_asymmetric.yaml (see the pinned
+# "tcad1d-extreme-doping-convergence-limit" note) - here extended
+# (tat/newton_solver_tat.py) with Kane band-to-band tunneling and Hurkx
+# trap-assisted tunneling (see plans/tat_btbt_plan.md), the dominant
+# leakage mechanism at this junction well before avalanche onset.
+#
+# Drain doping is 1e20 (not 2e20, an earlier draft's value) specifically
+# because this is the value tat/main_tat_substrate_sweep.py's own
+# substrate (Na) doping study was built around, and that study is what
+# this project settled on as the informative one to keep going forward
+# (see DEVELOPMENT_LOG.md): sweeping the DRAIN side (tried first,
+# tat/main_tat_doping_sweep.py, since removed) showed almost no effect
+# below 1e21 - in a one-sided step junction the LIGHT (substrate) side is
+# what actually sets the depletion width/field, so a doping study on the
+# heavy side alone was the less informative half of the story. Standardizing
+# the shipped single-run example on the SAME drain value used in that
+# substrate study keeps every number in this project's docs/plots directly
+# comparable instead of describing two different unrelated devices.
+#
+# Domain sizing: at this doping ratio essentially all the depletion width
+# sits on the LIGHT (substrate) side - analytic.depletion_widths gives
+# ~0.28 um there at Va=-5V, comfortably reverse-bias into the leakage
+# regime this example targets (per tat/tat.py's own sanity_probe,
+# TAT-driven leakage should already be clearly visible well before that,
+# unlike avalanche which needs much higher sustained field). Wn_um
+# (drain side) only needs to cover its own negligible depletion
+# penetration (<1nm) plus enough quasi-neutral bulk for a sane contact.
+#
+# Sweep range capped at -5V (not deeper): this is a normal-operation logic/
+# memory junction leakage example, not a power-device breakdown study -
+# -5V already comfortably exceeds what a non-power drain-substrate
+# junction sees in circuit operation.
+
+doping:
+  p_side:
+    type: flat
+    concentration_cm3: 1.0e17   # substrate
+  n_side:
+    type: flat
+    concentration_cm3: 1.0e20   # drain
+
+thickness:
+  Wp_um: 2.0   # substrate: comfortably exceeds the depletion width through -10V
+  Wn_um: 0.3   # drain: negligible depletion penetration, quasi-neutral bulk only
+
+material:
+  # eps_r: 11.7
+  # ni_cm3: 1.0e10
+
+mesh:
+  growth: 1.06
+  bulk_spacing_debye_factor: 5.0
+  junction_spacing_debye_factor: 0.05
+
+tat:
+  kane:
+    variant: quadratic   # quadratic (P=2, default) | three_half | linear - see tat/tat.py
+  hurkx:
+    m_t_over_m0: 0.25    # tunneling effective mass / free electron mass (Si literature default)
+    Et_minus_Ei_eV: 0.0  # trap level relative to intrinsic level; 0 = midgap (worst-case/typical)
+
+voltage_sweep:
+  # Near-equilibrium through moderate reverse bias - the leakage knee this
+  # example targets should already be visible well inside this range (see
+  # tat/tat.py's sanity_probe ordering check), unlike avalanche which
+  # needs a much deeper, finely-resolved sweep to reach runaway. Capped at
+  # -5V: normal (non-power) circuit operation doesn't push a drain-
+  # substrate junction beyond this, so there's no reason to sweep or plot
+  # deeper here.
+  reverse_start_V: -0.05
+  reverse_stop_V: -5.0
+  reverse_points: 40
+  forward_start_V: 0.0
+  forward_stop_V: 0.6
+  forward_points: 8
+
+solver:
+  math_model: newton_tat
+
+output:
+  save_bias_points: [-1, -2, -3, -4, -5]
+  structure_file: diode_drain_substrate_structure.json

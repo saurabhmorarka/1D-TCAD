@@ -26,6 +26,7 @@ from core.mesh import build_diode_grid, build_mos_grid
 from core.solver import voltage_sweep
 from core import analytic as dan
 from avalanche import avalanche_config as acfg
+from tat import tat_config as tcfg
 
 from mos import mos_config
 from mos.mos_solver import cv_sweep
@@ -110,6 +111,37 @@ def run_diode_breakdown(path=None):
         "ionization_integral_at_neg10V": ii_integral_sample,
         "Va_sample_V": [float(Va_arr[idx_neg1]), float(Va_arr[idx_neg10])],
         "I_numeric_sample_A": [float(I_num[idx_neg1]), float(I_num[idx_neg10])],
+    }
+
+
+def run_diode_tat(path=None):
+    """Drain-to-substrate TAT+BTBT leakage example (newton_tat). Regression
+    scalars are sampled at moderate reverse bias (-1V, -5V) - well inside
+    this mechanism's smooth, monotonic leakage-enhancement curve (see
+    plans/tat_btbt_plan.md and tat/main_tat.py's own I(Va) plot), not near
+    any sharp transition, so this stays stable under the normal
+    golden-comparison tolerance the way run_diode_breakdown's own sample
+    points deliberately avoid avalanche's sharp runaway."""
+    path = path or os.path.join(TCAD1D_ROOT, "configs", "input_diode_drain_substrate.yaml")
+    input_cfg = diode_cfg.load_config(path)
+    mat, dev, Va_list, math_model, save_bias_points, mesh_opts, structure_file = \
+        diode_cfg.build_from_config(input_cfg)
+    tcfg.parse_tat_config(input_cfg)  # exercised for parse-error coverage; models default inside the solver
+
+    g = build_diode_grid(mat, dev, **mesh_opts)
+    x, Cdop = g["x"], g["Cdop"]
+
+    _, _, _, results = voltage_sweep(x, Cdop, mat, dev, Va_list, method="newton_tat")
+    Va_arr = np.array([r["Va"] for r in results])
+    I_num = np.array([r["I"] for r in results])
+
+    idx_neg1 = int(np.argmin(np.abs(Va_arr - (-1.0))))
+    idx_neg5 = int(np.argmin(np.abs(Va_arr - (-5.0))))
+
+    return {
+        "n_mesh_points": len(x),
+        "Va_sample_V": [float(Va_arr[idx_neg1]), float(Va_arr[idx_neg5])],
+        "I_numeric_sample_A": [float(I_num[idx_neg1]), float(I_num[idx_neg5])],
     }
 
 
@@ -226,6 +258,7 @@ def run_mos_poly_sweep(path=None, dopings=POLY_SWEEP_DOPINGS):
 EXAMPLES = {
     "diode": run_diode,
     "diode_breakdown": run_diode_breakdown,
+    "diode_tat": run_diode_tat,
     "mos_metal": run_mos_metal,
     "mos_poly_single": run_mos_poly_single,
     "mos_poly_sweep": run_mos_poly_sweep,
