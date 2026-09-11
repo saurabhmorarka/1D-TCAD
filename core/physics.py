@@ -21,6 +21,18 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 from core.params import Q, Material
+from core.materials import MaterialField
+
+
+def _as_field(mat, x) -> MaterialField:
+    """Normalize a plain scalar Material into a MaterialField (constant
+    arrays, delta_Ei=0) - a MaterialField passed in is returned unchanged.
+    Every generalized function below does this as its first step, so a
+    homojunction caller passing a plain Material gets bit-for-bit identical
+    arithmetic to before (elementwise ops on a repeated-constant array
+    equal the scalar op exactly), and a heterojunction caller can pass a
+    MaterialField directly."""
+    return mat if isinstance(mat, MaterialField) else MaterialField.uniform(mat, x)
 
 
 def bernoulli(x: np.ndarray) -> np.ndarray:
@@ -64,7 +76,8 @@ def bernoulli_deriv(x: np.ndarray) -> np.ndarray:
     return out
 
 
-def equilibrium_bulk_potential(mat: Material, Cdop: float) -> float:
+def equilibrium_bulk_potential(mat: Material, Cdop: float, ni: float = None,
+                                delta_Ei: float = 0.0) -> float:
     """Exact charge-neutral bulk potential (psi with n=p=ni at psi=0) for a
     given net doping Cdop = Nd-Na, solving n0-p0=Cdop, n0*p0=ni^2 exactly
     (valid even when |Cdop| is not >> ni).
@@ -78,14 +91,46 @@ def equilibrium_bulk_potential(mat: Material, Cdop: float) -> float:
     p-sub=5e18 MOS-cap sweep producing NaN/singular-matrix downstream). Fix:
     for Cdop<0, compute the MAJORITY carrier p0 first (well-conditioned,
     adding two positive numbers) and get the minority n0=ni^2/p0 from it -
-    algebraically identical, just avoids the cancellation."""
-    ni = mat.ni
+    algebraically identical, just avoids the cancellation.
+
+    ni: optional override for mat.ni (e.g. the LOCAL ni at a heterojunction
+        contact, MaterialField.ni_arr[node] - mat is still needed for Vt).
+    delta_Ei: heterojunction Boltzmann-relation offset at this node (see
+        MaterialField's docstring) - 0.0 (default) reproduces today's exact
+        homojunction formula bit-for-bit. From n = ni*exp((psi-phin+delta_Ei)/Vt)
+        at equilibrium (phin=0): psi = Vt*ln(n0/ni) - delta_Ei.
+    """
+    ni = mat.ni if ni is None else ni
     if Cdop >= 0:
         n0 = (Cdop + np.sqrt(Cdop ** 2 + 4 * ni ** 2)) / 2.0
     else:
         p0 = (-Cdop + np.sqrt(Cdop ** 2 + 4 * ni ** 2)) / 2.0
         n0 = ni ** 2 / p0
-    return mat.Vt * np.log(n0 / ni)
+    return mat.Vt * np.log(n0 / ni) - delta_Ei
+
+
+def equilibrium_bulk_potential_arr(Vt: float, ni_arr: np.ndarray, Cdop: np.ndarray,
+                                    delta_Ei_arr: np.ndarray = None) -> np.ndarray:
+    """Vectorized sibling of equilibrium_bulk_potential, for a per-node
+    ni_arr (MaterialField.ni_arr) - same n0/p0 cancellation-avoidance logic,
+    applied elementwise via np.where instead of a scalar if/else."""
+    ni_arr = np.asarray(ni_arr, dtype=float)
+    Cdop = np.asarray(Cdop, dtype=float)
+    p0 = (-Cdop + np.sqrt(Cdop ** 2 + 4 * ni_arr ** 2)) / 2.0
+    n0_direct = (Cdop + np.sqrt(Cdop ** 2 + 4 * ni_arr ** 2)) / 2.0
+    # np.where evaluates BOTH branches everywhere (unlike the scalar
+    # function's if/else, which only ever evaluates the selected branch) -
+    # p0 can itself round to exactly 0.0 at large positive Cdop (the same
+    # cancellation this avoids for Cdop<0), so ni_arr**2/p0 would raise a
+    # spurious divide-by-zero warning at nodes where that branch is
+    # discarded anyway. Guard the denominator; the result at those nodes is
+    # never selected by the final np.where below.
+    p0_safe = np.where(p0 > 0, p0, 1.0)
+    n0 = np.where(Cdop >= 0, n0_direct, ni_arr ** 2 / p0_safe)
+    psi = Vt * np.log(n0 / ni_arr)
+    if delta_Ei_arr is not None:
+        psi = psi - delta_Ei_arr
+    return psi
 
 
 def _control_volumes(x: np.ndarray) -> np.ndarray:
@@ -102,7 +147,7 @@ def _control_volumes(x: np.ndarray) -> np.ndarray:
 def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
                    tol=1e-10, max_iter=100, damping_cap=None,
                    eps=None, ni=None, n_frozen=None, p_frozen=None,
-                   interfaces=None):
+                   interfaces=None, delta_Ei=None):
     """Newton solve of the nonlinear Poisson equation for psi(x), given fixed
     quasi-Fermi levels phin(x), phip(x) (both zero at equilibrium).
 
@@ -136,6 +181,11 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
         convention as Cdop: positive Qit_cm2 = positive/donor-like charge).
         None (default) or every interface's Qit_cm2=0.0 leaves the residual
         bit-identical to not passing this argument at all.
+    delta_Ei: heterojunction Boltzmann-relation offset, either None (default,
+        0 everywhere - today's exact behavior) or an array of length len(x)
+        - see MaterialField's docstring. Added/subtracted only in the two
+        n=/p= lines below; every Jacobian entry (dn/dpsi, dp/dpsi) is
+        unaffected since delta_Ei doesn't depend on psi.
     """
     N = len(x)
     h = np.diff(x)
@@ -143,6 +193,7 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
     Vt = mat.Vt
     eps_edge = np.broadcast_to(mat.eps if eps is None else eps, N - 1)
     ni_arr = np.broadcast_to(mat.ni if ni is None else ni, N)
+    delta_Ei_arr = np.zeros(N) if delta_Ei is None else np.broadcast_to(delta_Ei, N)
     n_frozen_mask = np.zeros(N, dtype=bool) if n_frozen is None else ~np.isnan(n_frozen)
     p_frozen_mask = np.zeros(N, dtype=bool) if p_frozen is None else ~np.isnan(p_frozen)
     Qit_node = np.zeros(N)
@@ -157,8 +208,8 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
     lap_coeff_p = eps_edge[1:] / hp / cvol
 
     for it in range(max_iter):
-        n = ni_arr * np.exp((psi - phin) / Vt)
-        p = ni_arr * np.exp((phip - psi) / Vt)
+        n = ni_arr * np.exp((psi - phin + delta_Ei_arr) / Vt)
+        p = ni_arr * np.exp((phip - psi - delta_Ei_arr) / Vt)
         if n_frozen is not None:
             n = np.where(n_frozen_mask, n_frozen, n)
         if p_frozen is not None:
@@ -214,8 +265,8 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
         if np.max(np.abs(delta)) < tol:
             break
 
-    n = ni_arr * np.exp((psi - phin) / Vt)
-    p = ni_arr * np.exp((phip - psi) / Vt)
+    n = ni_arr * np.exp((psi - phin + delta_Ei_arr) / Vt)
+    p = ni_arr * np.exp((phip - psi - delta_Ei_arr) / Vt)
     if n_frozen is not None:
         n = np.where(n_frozen_mask, n_frozen, n)
     if p_frozen is not None:
@@ -224,22 +275,67 @@ def solve_poisson(x, Cdop, mat: Material, phin, phip, psi_guess,
 
 
 def srh_recombination(mat: Material, n, p):
-    ni = mat.ni
-    return (n * p - ni ** 2) / (mat.tau_p * (n + ni) + mat.tau_n * (p + ni))
+    """mat may be a plain scalar Material (today's exact behavior) or a
+    MaterialField (per-node ni_arr/tau_n_arr/tau_p_arr) - the mass-action
+    term n*p-ni(x)^2 needs the LOCAL ni at each node; delta_Ei never enters
+    here (it cancels identically in the n*p product at equilibrium, since
+    n*p = ni(x)^2 regardless of how psi/phin/phip individually split - see
+    the harmonic-snuggling-puddle plan's physics section)."""
+    if isinstance(mat, MaterialField):
+        ni, tau_n, tau_p = mat.ni_arr, mat.tau_n_arr, mat.tau_p_arr
+    else:
+        ni, tau_n, tau_p = mat.ni, mat.tau_n, mat.tau_p
+    return (n * p - ni ** 2) / (tau_p * (n + ni) + tau_n * (p + ni))
+
+
+def _sg_potential_n(psi, mf: MaterialField) -> np.ndarray:
+    """The Scharfetter-Gummel Bernoulli-argument variable for ELECTRONS,
+    generalized for a heterojunction. Plain SG (u=psi/Vt) is exact/zero-
+    current-preserving at equilibrium because n_i=A*exp(u_i) with the SAME
+    constant A at every node - true for a homojunction (A=ni, node-
+    independent) but NOT at a heterojunction, where the equilibrium
+    (phin=0) electron density n0_i = ni(x_i)*exp((psi_i+delta_Ei_i)/Vt) has
+    a node-DEPENDENT prefactor ni(x_i) (it can jump ~100x right at a
+    material step, e.g. SiGe's much larger ni vs Si's - caught via a real
+    SiGe/Si sweep showing a ~4 orders of magnitude spurious current spike
+    at exactly the interface edge with the plain u=psi/Vt formula). Folding
+    ln(ni(x)) into u makes n0_i = 1*exp(u_n,i) with a node-INDEPENDENT
+    prefactor again, restoring SG's exact zero-current identity - verified
+    by hand: u_n,i = (psi_i+delta_Ei_i)/Vt + ln(ni_i) satisfies
+    n0_i = exp(u_n,i) exactly. Reduces to psi/Vt plus a GLOBAL constant
+    (ln(ni) is the same everywhere) for a homojunction - Bernoulli only
+    depends on DIFFERENCES u_{i+1}-u_i, so a global constant offset is
+    exactly cancelled, giving bit-identical behavior to before."""
+    return (psi + mf.delta_Ei_arr) / mf.Vt + np.log(mf.ni_arr)
+
+
+def _sg_potential_p(psi, mf: MaterialField) -> np.ndarray:
+    """Same generalization as _sg_potential_n, for HOLES: equilibrium
+    (phip=0) p0_i = ni(x_i)*exp(-(psi_i+delta_Ei_i)/Vt) = exp(-u_p,i) with
+    u_p,i = (psi_i+delta_Ei_i)/Vt - ln(ni_i) (note the SIGN of the ln(ni)
+    term flips relative to electrons - p0's prefactor divides by ni(x_i)
+    instead of multiplying by it). Also reduces to psi/Vt (mod an
+    inconsequential global constant) for a homojunction."""
+    return (psi + mf.delta_Ei_arr) / mf.Vt - np.log(mf.ni_arr)
 
 
 def solve_continuity_n(x, psi, mat: Material, R, n_bc0, n_bcL):
     """Linear tridiagonal solve for electron density n(x) given psi(x) and a
-    (lagged) recombination source R(x), with Dirichlet BC at both contacts."""
+    (lagged) recombination source R(x), with Dirichlet BC at both contacts.
+    mat may be a plain scalar Material or a MaterialField (per-edge Dn) -
+    see _sg_potential_n for why a heterojunction needs u generalized beyond
+    plain psi/Vt."""
     N = len(x)
     h = np.diff(x)
-    u = psi / mat.Vt
+    mf = _as_field(mat, x)
+    Vt = mf.Vt
+    u = _sg_potential_n(psi, mf)
     W = _control_volumes(x)
 
     Bp = bernoulli(u[1:] - u[:-1])   # B(u_{i+1} - u_i), for edge i (i -> i+1)
     Bm = bernoulli(u[:-1] - u[1:])   # B(u_i - u_{i+1})
 
-    coef = Q * mat.Dn / h  # per-edge conductance-like coefficient, edge i between node i,i+1
+    coef = Q * mf.Dn_edge / h  # per-edge conductance-like coefficient, edge i between node i,i+1
 
     lower = np.zeros(N)
     diag = np.zeros(N)
@@ -265,16 +361,20 @@ def solve_continuity_n(x, psi, mat: Material, R, n_bc0, n_bcL):
 
 
 def solve_continuity_p(x, psi, mat: Material, R, p_bc0, p_bcL):
-    """Linear tridiagonal solve for hole density p(x)."""
+    """Linear tridiagonal solve for hole density p(x). mat may be a plain
+    scalar Material or a MaterialField (per-edge Dp) - see _sg_potential_p
+    for why a heterojunction needs u generalized beyond plain psi/Vt."""
     N = len(x)
     h = np.diff(x)
-    u = psi / mat.Vt
+    mf = _as_field(mat, x)
+    Vt = mf.Vt
+    u = _sg_potential_p(psi, mf)
     W = _control_volumes(x)
 
     Bp = bernoulli(u[1:] - u[:-1])
     Bm = bernoulli(u[:-1] - u[1:])
 
-    coef = Q * mat.Dp / h
+    coef = Q * mf.Dp_edge / h
 
     lower = np.zeros(N)
     diag = np.zeros(N)
@@ -300,12 +400,20 @@ def solve_continuity_p(x, psi, mat: Material, R, p_bc0, p_bcL):
 
 
 def edge_currents(x, psi, n, p, mat: Material):
-    """Electron, hole, and total current density (A/cm^2) at each cell edge."""
+    """Electron, hole, and total current density (A/cm^2) at each cell edge.
+    mat may be a plain scalar Material or a MaterialField (per-edge Dn/Dp) -
+    see _sg_potential_n/_sg_potential_p for why electrons and holes need
+    their OWN Bernoulli-argument arrays at a heterojunction (they agree,
+    reducing to a single shared psi/Vt-based Bp/Bm, for a homojunction)."""
     h = np.diff(x)
-    u = psi / mat.Vt
-    Bp = bernoulli(u[1:] - u[:-1])
-    Bm = bernoulli(u[:-1] - u[1:])
+    mf = _as_field(mat, x)
+    u_n = _sg_potential_n(psi, mf)
+    u_p = _sg_potential_p(psi, mf)
+    Bp_n = bernoulli(u_n[1:] - u_n[:-1])
+    Bm_n = bernoulli(u_n[:-1] - u_n[1:])
+    Bp_p = bernoulli(u_p[1:] - u_p[:-1])
+    Bm_p = bernoulli(u_p[:-1] - u_p[1:])
 
-    Jn = (Q * mat.Dn / h) * (n[1:] * Bp - n[:-1] * Bm)
-    Jp = (Q * mat.Dp / h) * (p[:-1] * Bp - p[1:] * Bm)
+    Jn = (Q * mf.Dn_edge / h) * (n[1:] * Bp_n - n[:-1] * Bm_n)
+    Jp = (Q * mf.Dp_edge / h) * (p[:-1] * Bp_p - p[1:] * Bm_p)
     return Jn, Jp, Jn + Jp

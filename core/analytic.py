@@ -9,21 +9,77 @@ import numpy as np
 from core.params import Q, Material, Device
 
 
-def built_in_potential(mat: Material, dev: Device) -> float:
-    """Vbi = Vt * ln(Na*Nd/ni^2)."""
-    return mat.Vt * np.log(dev.Na * dev.Nd / mat.ni ** 2)
+def built_in_potential(mat_p: Material, dev: Device, mat_n: Material = None) -> float:
+    """Vbi = Vt * ln(Na*Nd/ni^2) for a homojunction (mat_n=None, default -
+    every existing call site passes just (mat, dev) and gets this exact
+    formula, unchanged - mirrors core.mesh.build_diode_grid's own
+    mat_n=None backward-compat pattern).
+
+    mat_n given (a real heterojunction): returns the genuinely independent
+    (no PDE/mesh dependency) closed form Vbi_hetero, built from each side's
+    own EXACT bulk equilibrium potential (core.physics.equilibrium_
+    bulk_potential - material-only, no solve) minus that side's
+    delta_Ei (core.materials.delta_Ei_of - also material-only): the SAME
+    quantity core.materials.MaterialField.from_regions computes for the
+    PDE solve, reused here (not re-derived) so the closed form and the
+    solve's own boundary conditions agree by construction.
+        psi_p_bulk = equilibrium_bulk_potential(mat_p, -Na) - delta_Ei_of(mat_p, mat_n)
+        psi_n_bulk = equilibrium_bulk_potential(mat_n,  Nd) - delta_Ei_of(mat_n, mat_n) = equilibrium_bulk_potential(mat_n, Nd)
+        Vbi_hetero = psi_n_bulk - psi_p_bulk
+    Reduces to the plain formula above when mat_p=mat_n (delta_Ei=0, and
+    equilibrium_bulk_potential's EXACT n0/p0 solve collapses to the
+    Na,Nd>>ni approximation the plain formula uses, verified numerically in
+    testsuite/test_analytic_tat.py for every doping level this project's
+    examples actually use)."""
+    if mat_n is None:
+        return mat_p.Vt * np.log(dev.Na * dev.Nd / mat_p.ni ** 2)
+
+    from core.materials import delta_Ei_of
+    from core.physics import equilibrium_bulk_potential
+    psi_p_bulk = equilibrium_bulk_potential(mat_p, -dev.Na) - delta_Ei_of(mat_p, mat_n)
+    psi_n_bulk = equilibrium_bulk_potential(mat_n, dev.Nd)  # delta_Ei_of(mat_n, mat_n) == 0
+    return psi_n_bulk - psi_p_bulk
 
 
-def depletion_widths(mat: Material, dev: Device, Va: float = 0.0):
+def depletion_widths(mat_p: Material, dev: Device, Va: float = 0.0, mat_n: Material = None):
     """Depletion-approximation widths on each side, step junction, under
-    applied bias Va (forward positive on the p-side). Returns (xp, xn, W)."""
-    Vbi = built_in_potential(mat, dev)
+    applied bias Va (forward positive on the p-side). Returns (xp, xn, W).
+
+    mat_n=None (default): homojunction, today's exact formula (every
+    existing call site keeps passing 2-3 positional args and is unaffected).
+
+    mat_n given: two-material (heterojunction) step-junction depletion
+    approximation (standard Sze-style derivation - see built_in_potential's
+    own docstring for the Vbi this uses). D-field continuity at x=0 still
+    reduces to the SAME charge-balance relation Na*xp=Nd*xn regardless of
+    eps_p/eps_n (D_max_p=q*Na*xp=D_max_n=q*Nd*xn by construction below, not
+    assumed), so only the VOLTAGE-drop relation needs the two eps's:
+        V = Vbi-Va = (q/2)*(Na*xp^2/eps_p + Nd*xn^2/eps_n)
+    Substituting xp=xn*Nd/Na and solving for xn:
+        xn = sqrt(2*V / (q*Nd*(Nd/(Na*eps_p) + 1/eps_n)))
+        xp = xn*Nd/Na
+    Verified BY HAND (and in testsuite/test_analytic_tat.py) that this
+    reduces algebraically EXACTLY to the homojunction W/xp/xn formula below
+    when eps_p=eps_n=eps (not merely approximately): with eps_p=eps_n=eps,
+    xn^2 = 2*V*eps*Na/(q*Nd*(Na+Nd)), which is exactly W^2*Na^2/(Na+Nd)^2
+    with W as defined below - same algebra, not a coincidence.
+    W is returned as xp+xn in the heterojunction case (still the total
+    depletion width; "W=sqrt(...)" doesn't individually apply once eps_p
+    != eps_n, since xp/xn no longer share one common prefactor)."""
+    Vbi = built_in_potential(mat_p, dev, mat_n=mat_n)
     V = Vbi - Va  # total potential dropped across the junction under bias
     V = max(V, 1e-6)  # guard against forward bias collapsing the depletion width in this simple formula
-    W = np.sqrt(2 * mat.eps * V / Q * (1.0 / dev.Na + 1.0 / dev.Nd))
-    xp = W * dev.Nd / (dev.Na + dev.Nd)   # depletion extent into p-side
-    xn = W * dev.Na / (dev.Na + dev.Nd)   # depletion extent into n-side
-    return xp, xn, W
+
+    if mat_n is None:
+        W = np.sqrt(2 * mat_p.eps * V / Q * (1.0 / dev.Na + 1.0 / dev.Nd))
+        xp = W * dev.Nd / (dev.Na + dev.Nd)   # depletion extent into p-side
+        xn = W * dev.Na / (dev.Na + dev.Nd)   # depletion extent into n-side
+        return xp, xn, W
+
+    eps_p, eps_n = mat_p.eps, mat_n.eps
+    xn = np.sqrt(2.0 * V / (Q * dev.Nd * (dev.Nd / (dev.Na * eps_p) + 1.0 / eps_n)))
+    xp = xn * dev.Nd / dev.Na
+    return xp, xn, xp + xn
 
 
 def depletion_potential_profile(mat: Material, dev: Device, x: np.ndarray, Va: float = 0.0):
@@ -208,3 +264,105 @@ def cv_curve_analytic(mat: Material, dev: Device, Va: np.ndarray, use_fd: bool =
     C_dep_fd = mat.eps / W
     C_diff_fd = diffusion_capacitance(mat, dev, Va, p0_n_side=p0_n_side, n0_p_side=n0_p_side)
     return C_dep_fd + C_diff_fd
+
+
+# ---- TAT/BTBT reverse-leakage closed forms (no PDE/mesh dependency) ----
+# Added to independently validate tat/newton_solver_tat.py's I(Va) - this
+# project had closed forms for every OTHER solver (built_in_potential/
+# depletion_widths/shockley_current for the plain diode,
+# breakdown_voltage_sze/ionization_integral for avalanche) but none for
+# TAT/BTBT leakage until now. Both functions below take mat_p/mat_n
+# (mat_n=None defaults to mat_p, the SAME backward-compat pattern used
+# throughout this project - mesh.build_diode_grid's mat_n=None,
+# built_in_potential/depletion_widths above), so ONE implementation covers
+# both the homogeneous-Si drain-substrate example and the new SiGe/Si one.
+
+def generation_current_srh(mat_p: Material, dev: Device, Va: float, mat_n: Material = None) -> float:
+    """Plain (F=0, no field-enhancement/tunneling) SRH depletion-generation
+    leakage current - the F->0 limit tat.tat.hurkx_tat_generation itself
+    reduces to, used here as the baseline "before tunneling" closed form
+    (the closed-form counterpart of the numeric no-tunneling newton_qf
+    comparison sweep tat/main_tat.py already runs).
+
+    At full depletion (n,p -> 0), SRH's generation rate is the textbook
+    G = ni/(tau_n+tau_p) (verified against tat.tat.hurkx_tat_generation
+    directly: at Gamma=0 (F=0) and n=p=0, tau_n_eff=tau_n, tau_p_eff=tau_p,
+    n1=p1=ni (Et=Ei default), R=(0-ni^2)/(tau_p*ni+tau_n*ni)=-ni/(tau_n+tau_p),
+    G_tat=-R=ni/(tau_n+tau_p) - matches exactly). Constant across each
+    side's depletion width (no field dependence), so the generation
+    CURRENT is just G*width per side, piecewise since ni/tau can differ
+    across a heterojunction:
+        J = q*[ni(mat_p)/(tau_n(mat_p)+tau_p(mat_p))*xp
+              + ni(mat_n)/(tau_n(mat_n)+tau_p(mat_n))*xn]
+    Sign convention matches this project's Va<0=reverse/leakage-negative
+    convention (see tat/main_tat.py's own I(Va) plot) - this returns a
+    NEGATIVE current for Va<0 (a generation, not recombination, current
+    flowing from n to p), matching the numeric solver's own sign."""
+    mat_n = mat_p if mat_n is None else mat_n
+    xp, xn, _ = depletion_widths(mat_p, dev, Va, mat_n=mat_n)
+    G_p = mat_p.ni / (mat_p.tau_n + mat_p.tau_p)
+    G_n = mat_n.ni / (mat_n.tau_n + mat_n.tau_p)
+    J = Q * (G_p * xp + G_n * xn)
+    return -J * dev.area
+
+
+def generation_current_tat(mat_p: Material, dev: Device, Va: float,
+                            hurkx_model, kane_model, mat_n: Material = None,
+                            n_probe: int = 2000) -> float:
+    """Field-enhanced closed-form leakage current: Hurkx trap-assisted
+    tunneling (field-enhanced SRH) plus Kane band-to-band tunneling,
+    integrated over the depletion-approximation's TRIANGULAR field profile
+    (same style as ionization_integral's own closed-form field model) -
+    the closed-form counterpart of tat/newton_solver_tat.py's full
+    newton_tat numeric solve.
+
+    Deliberately reuses tat.tat.hurkx_gamma/btbt_generation directly (the
+    SAME fitted models the numeric solver uses) rather than re-deriving
+    them - this validates the SOLVER's own discretization/boundary-
+    condition/mesh machinery against an independent field profile and
+    quadrature, not tat.py's formulas themselves (which already have their
+    own standalone tat.tat.sanity_probe() check).
+
+    E_p(x) = E_max_p*(1-|x|/xp) for -xp<=x<=0, E_n(x) = E_max_n*(1-x/xn)
+    for 0<=x<=xn (E_max_p=q*Na*xp/eps_p, E_max_n=q*Nd*xn/eps_n - D=eps*E
+    continuous at x=0 by construction, D_max_p=D_max_n=q*Na*xp=q*Nd*xn from
+    depletion_widths' own charge-balance relation).
+
+    Integrand per side: [ni/(tau_n+tau_p)]*(1+Gamma(F(x))) (Hurkx-enhanced
+    SRH generation - reduces to generation_current_srh's plain G at F=0
+    since Gamma(0)=0) PLUS the separate, purely additive Kane term
+    G_btbt(F(x)) (btbt_generation - no SRH trap involved at all, same
+    additive-not-multiplicative treatment newton_solver_tat.py's own Reff
+    uses). np.trapz quadrature over n_probe points per side (2000 default,
+    matching ionization_integral's own resolution)."""
+    from tat.tat import hurkx_gamma, btbt_generation
+    mat_n = mat_p if mat_n is None else mat_n
+    xp, xn, _ = depletion_widths(mat_p, dev, Va, mat_n=mat_n)
+
+    E_max_p = Q * dev.Na * xp / mat_p.eps
+    E_max_n = Q * dev.Nd * xn / mat_n.eps
+
+    x_p = np.linspace(-xp, 0.0, n_probe)
+    x_n = np.linspace(0.0, xn, n_probe)
+    F_p = E_max_p * (1.0 - np.abs(x_p) / max(xp, 1e-300))
+    F_n = E_max_n * (1.0 - x_n / max(xn, 1e-300))
+    F_p = np.clip(F_p, 0.0, None)
+    F_n = np.clip(F_n, 0.0, None)
+
+    G0_p = mat_p.ni / (mat_p.tau_n + mat_p.tau_p)
+    G0_n = mat_n.ni / (mat_n.tau_n + mat_n.tau_p)
+
+    Gamma_p, _ = hurkx_gamma(F_p, mat_p.T, hurkx_model)
+    Gamma_n, _ = hurkx_gamma(F_n, mat_n.T, hurkx_model)
+    Gbtbt_p, _ = btbt_generation(F_p, kane_model)
+    Gbtbt_n, _ = btbt_generation(F_n, kane_model)
+
+    integrand_p = G0_p * (1.0 + Gamma_p) + Gbtbt_p
+    integrand_n = G0_n * (1.0 + Gamma_n) + Gbtbt_n
+
+    _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz  # numpy>=2.0 renamed trapz
+    total_gen_p = float(_trapz(integrand_p, x_p))  # cm^-2 s^-1 (integrated over x, cm)
+    total_gen_n = float(_trapz(integrand_n, x_n))
+
+    J = Q * (total_gen_p + total_gen_n)
+    return -J * dev.area

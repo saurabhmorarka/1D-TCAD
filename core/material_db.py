@@ -12,7 +12,7 @@ catalog entries, and nothing about them changes here.
 """
 import dataclasses
 
-from core.materials import MaterialProperties
+from core.materials import AlloyMaterial, MaterialProperties
 
 MATERIALS: dict = {
     "Silicon": MaterialProperties(
@@ -64,5 +64,42 @@ def derive(name: str, base: str, **overrides) -> MaterialProperties:
     """
     base_props = get(base) if isinstance(base, str) else base
     derived = dataclasses.replace(base_props, name=name, **overrides)
+    MATERIALS[name] = derived
+    return derived
+
+
+def derive_alloy(name: str, alloy: AlloyMaterial, x: float,
+                  strained_on: str = None, x_substrate_Ge: float = 0.0,
+                  **overrides) -> MaterialProperties:
+    """Register a new named material by resolving an AlloyMaterial at
+    composition x (Vegard-law mixing + Eg bowing, see materials.AlloyMaterial)
+    and storing the result under `name`, mirroring derive()'s "register a
+    named catalog entry" pattern but sourced from a parametric alloy instead
+    of a discrete copy-and-override of one existing entry. **overrides
+    apply on top of the resolved composition (dataclasses.replace), e.g. to
+    hand-tune a field the Vegard/bowing mix doesn't capture well.
+
+    Calibration note for the relaxed p-SiGe(x_Ge=0.4)/n-Si heterojunction
+    example this was added for: AlloyMaterial("SixGe1-x", "Silicon",
+    "Germanium", bowing_eV=0.36).resolve(x_a=0.6) (i.e. Si_0.6 Ge_0.4) lands
+    at Eg ~= 0.85 eV, the standard Braunstein/People relaxed-alloy fit for
+    that composition - bowing_eV is left at AlloyMaterial's default 0.0
+    (no bowing) unless the caller passes one, so an uncalibrated call will
+    NOT reproduce that number; 0.36 eV is what the calibrated
+    configs/input_diode_sige_pn.yaml example actually passes.
+
+    strained_on: pass a substrate material name (e.g. "Silicon") to resolve
+    via alloy.resolve_strained(x, substrate=strained_on, x_substrate_Ge=...)
+    instead of the plain relaxed alloy.resolve(x) - the compressively-
+    strained Si(1-x)Ge(x)-on-substrate band offsets (People & Bean, see
+    materials.strained_sige_on_si_offsets), used by
+    configs/input_diode_sige_pn_strained.yaml. None (default) keeps
+    today's exact relaxed behavior."""
+    if strained_on is not None:
+        resolved = alloy.resolve_strained(x, substrate=strained_on, x_substrate_Ge=x_substrate_Ge)
+    else:
+        resolved = alloy.resolve(x)
+    derived = dataclasses.replace(resolved, name=name, **overrides) if overrides else \
+        dataclasses.replace(resolved, name=name)
     MATERIALS[name] = derived
     return derived

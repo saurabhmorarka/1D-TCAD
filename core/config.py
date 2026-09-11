@@ -22,9 +22,88 @@ def load_config(path: str = DEFAULT_PATH) -> dict:
     return cfg
 
 
-def build_from_config(cfg: dict):
-    """Returns (Material, Device, Va_array, math_model, save_bias_points, mesh_opts, structure_file)."""
+def _resolve_material_block(block: dict) -> Material:
+    """Resolve one `material:`-shaped block (name/derive_from/overrides/T_K,
+    or the new alloy: {...} option) into a live Material - shared by the
+    top-level `material:` block (today's exact behavior) and the new
+    `material.p_side`/`material.n_side` sub-blocks (see build_from_config),
+    each shaped identically. An empty/missing block returns Material()'s
+    defaults, exactly like today's top-level-only path."""
     mat = Material()
+    block = block or {}
+
+    if block.get("alloy") is not None:
+        from core import material_db
+        from core.materials import AlloyMaterial, resolve_material
+        name = block.get("name")
+        if not name:
+            raise ValueError(
+                "material block with 'alloy' requires 'name' to register the "
+                "resolved composition under (e.g. name: SiGe_x0.4)")
+        alloy_cfg = block["alloy"]
+        alloy = AlloyMaterial(
+            name=name,
+            end_member_a=alloy_cfg["end_member_a"],
+            end_member_b=alloy_cfg["end_member_b"],
+            bowing_eV=float(alloy_cfg.get("bowing_eV", 0.0)),
+        )
+        # strain: {substrate, x_substrate_Ge} - optional, compressively
+        # strained Si(1-x)Ge(x)-on-substrate band offsets (People & Bean,
+        # see core.materials.strained_sige_on_si_offsets) instead of the
+        # plain relaxed Vegard-mixed alloy. Omitted (as in the original
+        # relaxed configs/input_diode_sige_pn.yaml example) keeps today's
+        # exact relaxed behavior.
+        strain_cfg = alloy_cfg.get("strain")
+        if strain_cfg is not None:
+            material_db.derive_alloy(
+                name, alloy, float(alloy_cfg["x_a"]),
+                strained_on=strain_cfg.get("substrate", "Silicon"),
+                x_substrate_Ge=float(strain_cfg.get("x_substrate_Ge", 0.0)))
+        else:
+            material_db.derive_alloy(name, alloy, float(alloy_cfg["x_a"]))
+        mat = resolve_material(material_db.get(name), float(block.get("T_K", 300.0)))
+    elif block.get("name") is not None:
+        from core import material_db
+        from core.materials import resolve_material
+        name = block["name"]
+        if name not in material_db.MATERIALS:
+            derive_from = block.get("derive_from")
+            if not derive_from:
+                raise ValueError(
+                    f"material.name {name!r} is not in the material database; "
+                    f"give material.derive_from to derive it from a known "
+                    f"material (known materials: {sorted(material_db.MATERIALS)})")
+            raw_overrides = block.get("overrides") or {}
+            overrides = {}
+            for key, value in raw_overrides.items():
+                if key.endswith("_ns"):
+                    overrides[key[:-3]] = float(value) * 1.0e-9
+                else:
+                    overrides[key] = float(value)
+            material_db.derive(name, derive_from, **overrides)
+        mat = resolve_material(material_db.get(name), float(block.get("T_K", 300.0)))
+    elif block.get("T_K") is not None:
+        raise ValueError(
+            "material.T_K requires material.name (no material identity to "
+            "apply its temperature-dependent formulas to)")
+
+    if block.get("eps_r") is not None:
+        mat.eps_r = float(block["eps_r"])
+    if block.get("ni_cm3") is not None:
+        mat.ni = float(block["ni_cm3"])
+    return mat
+
+
+def build_from_config(cfg: dict):
+    """Returns (Material, Device, Va_array, math_model, save_bias_points, mesh_opts, structure_file).
+
+    `mesh_opts` includes a `mat_n` key (None for a homojunction, i.e. every
+    existing config with no material.p_side/n_side split - see
+    core.mesh.build_diode_grid's own mat_n=None default) - this keeps the
+    return tuple's ARITY unchanged (every existing call site's fixed
+    7-value unpacking stays valid) while still threading a real second
+    material through to build_diode_grid(mat, dev, **mesh_opts) for a
+    heterojunction config."""
     dev = Device()
 
     doping = cfg.get("doping") or {}
@@ -40,40 +119,19 @@ def build_from_config(cfg: dict):
         dev.Wn = float(thickness["Wn_um"]) * 1e-4
 
     material = cfg.get("material") or {}
-    if material.get("name") is not None:
-        from core import material_db
-        from core.materials import resolve_material
-        name = material["name"]
-        if name not in material_db.MATERIALS:
-            derive_from = material.get("derive_from")
-            if not derive_from:
-                raise ValueError(
-                    f"material.name {name!r} is not in the material database; "
-                    f"give material.derive_from to derive it from a known "
-                    f"material (known materials: {sorted(material_db.MATERIALS)})")
-            raw_overrides = material.get("overrides") or {}
-            overrides = {}
-            for key, value in raw_overrides.items():
-                if key.endswith("_ns"):
-                    overrides[key[:-3]] = float(value) * 1.0e-9
-                else:
-                    overrides[key] = float(value)
-            material_db.derive(name, derive_from, **overrides)
-        mat = resolve_material(material_db.get(name), float(material.get("T_K", 300.0)))
-    elif material.get("T_K") is not None:
-        raise ValueError(
-            "material.T_K requires material.name (no material identity to "
-            "apply its temperature-dependent formulas to)")
-    if material.get("eps_r") is not None:
-        mat.eps_r = float(material["eps_r"])
-    if material.get("ni_cm3") is not None:
-        mat.ni = float(material["ni_cm3"])
+    mat_n = None
+    if material.get("p_side") is not None or material.get("n_side") is not None:
+        mat = _resolve_material_block(material.get("p_side"))
+        mat_n = _resolve_material_block(material.get("n_side"))
+    else:
+        mat = _resolve_material_block(material)
 
     mesh_cfg = cfg.get("mesh") or {}
     mesh_opts = dict(
         growth=float(mesh_cfg.get("growth", 1.06)),
         bulk_spacing_debye_factor=float(mesh_cfg.get("bulk_spacing_debye_factor", 5.0)),
         junction_spacing_debye_factor=float(mesh_cfg.get("junction_spacing_debye_factor", 0.05)),
+        mat_n=mat_n,
     )
 
     vs = cfg.get("voltage_sweep", {})

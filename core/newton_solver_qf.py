@@ -54,6 +54,8 @@ import scipy.sparse.linalg as spla
 
 from core.params import Q, Material
 from core import physics as ph
+from core.materials import MaterialField
+from core.jacobian_scaling import equilibrated_spsolve
 from core.solver import contact_values
 
 # Public building blocks shared with other QF-based solvers (currently
@@ -66,11 +68,22 @@ __all__ = ["poisson_row_scale", "continuity_row_scale", "unpack_qf", "MAX_QF_STE
 
 
 def poisson_row_scale(mat: Material, h_typ: float) -> float:
-    return mat.eps * mat.Vt / h_typ ** 2
+    """mat may be a plain scalar Material or a MaterialField (heterojunction)
+    - a mean over the eps_edge array is used as the representative scale
+    (this only affects Newton's row-scaling/conditioning, not accuracy, so
+    an approximate scalar is fine; reduces to mat.eps exactly for a
+    homojunction MaterialField.uniform(), i.e. bit-identical to before)."""
+    eps = mat.eps if not isinstance(mat, MaterialField) else float(np.mean(mat.eps_edge))
+    return eps * mat.Vt / h_typ ** 2
 
 
 def continuity_row_scale(mat: Material, h_typ: float) -> float:
-    return Q * mat.Dn * mat.ni / h_typ
+    if isinstance(mat, MaterialField):
+        Dn = float(np.mean(mat.Dn_edge))
+        ni = float(np.mean(mat.ni_arr))
+    else:
+        Dn, ni = mat.Dn, mat.ni
+    return Q * Dn * ni / h_typ
 
 
 def unpack_qf(U, N):
@@ -80,16 +93,20 @@ def unpack_qf(U, N):
 
 def _edge_quantities(psi, phin, phip, n, p, x, mat):
     """Per-edge plain-gradient flux and recombination - shared by the
-    residual-only and residual+Jacobian paths so they never disagree."""
+    residual-only and residual+Jacobian paths so they never disagree. mat
+    must already be a MaterialField (callers normalize once via
+    core.materials.MaterialField.uniform() for a plain scalar Material, see
+    newton_gummel_solve) - array reads here are bit-identical to the old
+    scalar mat.mu_n/mat.tau_n/mat.ni reads for a homojunction."""
     h = np.diff(x)
     n_avg = (n[:-1] + n[1:]) / 2.0
     p_avg = (p[:-1] + p[1:]) / 2.0
 
-    Jn = -Q * mat.mu_n * n_avg * (phin[1:] - phin[:-1]) / h
-    Jp = -Q * mat.mu_p * p_avg * (phip[1:] - phip[:-1]) / h
+    Jn = -Q * mat.mu_n_edge * n_avg * (phin[1:] - phin[:-1]) / h
+    Jp = -Q * mat.mu_p_edge * p_avg * (phip[1:] - phip[:-1]) / h
 
-    ni = mat.ni
-    denom = mat.tau_p * (n + ni) + mat.tau_n * (p + ni)
+    ni = mat.ni_arr
+    denom = mat.tau_p_arr * (n + ni) + mat.tau_n_arr * (p + ni)
     num = n * p - ni ** 2
     R = num / denom
     return h, n_avg, p_avg, Jn, Jp, R, denom, num
@@ -98,12 +115,13 @@ def _edge_quantities(psi, phin, phip, n, p, x, mat):
 def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale):
     """Fast path: residual vector only, no Jacobian. Used for line-search
     trial evaluations, which don't need a new Jacobian until a step is
-    accepted."""
+    accepted. mat must already be a MaterialField (see newton_gummel_solve,
+    which normalizes a plain scalar Material once via MaterialField.uniform())."""
     N = len(x)
     psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
+    n = mat.ni_arr * np.exp((psi - phin + mat.delta_Ei_arr) / Vt)
+    p = mat.ni_arr * np.exp((phip - psi - mat.delta_Ei_arr) / Vt)
     cvol = ph._control_volumes(x)
 
     Rpsi = np.empty(N)
@@ -116,8 +134,8 @@ def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, con
     h = np.diff(x)
     hm, hp = h[:-1], h[1:]
     cvol_i = cvol[1:-1]
-    lap_m = mat.eps / hm / cvol_i
-    lap_p = mat.eps / hp / cvol_i
+    lap_m = mat.eps_edge[:-1] / hm / cvol_i
+    lap_p = mat.eps_edge[1:] / hp / cvol_i
     Rpsi[1:-1] = (lap_p * (psi[2:] - psi[1:-1]) - lap_m * (psi[1:-1] - psi[:-2])
                   - Q * (n[1:-1] - p[1:-1] - Cdop[1:-1])) / poisson_scale
 
@@ -131,12 +149,13 @@ def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, con
 def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale):
     """Returns (F, J) where F is the length-3N residual vector and J is the
     3N x 3N sparse Jacobian dF/dU, for unknowns U=[psi, phin, phip]. Fully
-    vectorized (no per-node Python loop)."""
+    vectorized (no per-node Python loop). mat must already be a
+    MaterialField (see newton_gummel_solve)."""
     N = len(x)
     psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
+    n = mat.ni_arr * np.exp((psi - phin + mat.delta_Ei_arr) / Vt)
+    p = mat.ni_arr * np.exp((phip - psi - mat.delta_Ei_arr) / Vt)
     cvol = ph._control_volumes(x)
 
     Rpsi = np.empty(N)
@@ -149,14 +168,17 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_sc
     h = np.diff(x)
     hm, hp = h[:-1], h[1:]
     cvol_i = cvol[1:-1]
-    lap_m = mat.eps / hm / cvol_i
-    lap_p = mat.eps / hp / cvol_i
+    lap_m = mat.eps_edge[:-1] / hm / cvol_i
+    lap_p = mat.eps_edge[1:] / hp / cvol_i
     Rpsi[1:-1] = (lap_p * (psi[2:] - psi[1:-1]) - lap_m * (psi[1:-1] - psi[:-2])
                   - Q * (n[1:-1] - p[1:-1] - Cdop[1:-1])) / poisson_scale
 
     h_e, n_avg, p_avg, Jn, Jp, R, denom, num = _edge_quantities(psi, phin, phip, n, p, x, mat)
 
     # dn/dpsi = n/Vt, dn/dphin = -n/Vt ; dp/dpsi = -p/Vt, dp/dphip = p/Vt
+    # (delta_Ei doesn't depend on any unknown, so these derivatives are
+    # exactly unchanged from the homojunction formula - see the harmonic-
+    # snuggling-puddle plan's physics section)
     dn_dpsi = n / Vt
     dn_dphin = -n / Vt
     dp_dpsi = -p / Vt
@@ -165,20 +187,20 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_sc
     dphin_e = phin[1:] - phin[:-1]
     dphip_e = phip[1:] - phip[:-1]
 
-    # Jn_e = -Q*mu_n*n_avg*dphin_e/h ; n_avg = (n_i+n_{i+1})/2
-    dJn_dpsi_e = -Q * mat.mu_n / h_e * (dn_dpsi[:-1] / 2.0) * dphin_e
-    dJn_dpsi_ep1 = -Q * mat.mu_n / h_e * (dn_dpsi[1:] / 2.0) * dphin_e
-    dJn_dphin_e = -Q * mat.mu_n / h_e * ((dn_dphin[:-1] / 2.0) * dphin_e - n_avg)
-    dJn_dphin_ep1 = -Q * mat.mu_n / h_e * ((dn_dphin[1:] / 2.0) * dphin_e + n_avg)
+    # Jn_e = -Q*mu_n_edge*n_avg*dphin_e/h ; n_avg = (n_i+n_{i+1})/2
+    dJn_dpsi_e = -Q * mat.mu_n_edge / h_e * (dn_dpsi[:-1] / 2.0) * dphin_e
+    dJn_dpsi_ep1 = -Q * mat.mu_n_edge / h_e * (dn_dpsi[1:] / 2.0) * dphin_e
+    dJn_dphin_e = -Q * mat.mu_n_edge / h_e * ((dn_dphin[:-1] / 2.0) * dphin_e - n_avg)
+    dJn_dphin_ep1 = -Q * mat.mu_n_edge / h_e * ((dn_dphin[1:] / 2.0) * dphin_e + n_avg)
 
-    # Jp_e = -Q*mu_p*p_avg*dphip_e/h
-    dJp_dpsi_e = -Q * mat.mu_p / h_e * (dp_dpsi[:-1] / 2.0) * dphip_e
-    dJp_dpsi_ep1 = -Q * mat.mu_p / h_e * (dp_dpsi[1:] / 2.0) * dphip_e
-    dJp_dphip_e = -Q * mat.mu_p / h_e * ((dp_dphip[:-1] / 2.0) * dphip_e - p_avg)
-    dJp_dphip_ep1 = -Q * mat.mu_p / h_e * ((dp_dphip[1:] / 2.0) * dphip_e + p_avg)
+    # Jp_e = -Q*mu_p_edge*p_avg*dphip_e/h
+    dJp_dpsi_e = -Q * mat.mu_p_edge / h_e * (dp_dpsi[:-1] / 2.0) * dphip_e
+    dJp_dpsi_ep1 = -Q * mat.mu_p_edge / h_e * (dp_dpsi[1:] / 2.0) * dphip_e
+    dJp_dphip_e = -Q * mat.mu_p_edge / h_e * ((dp_dphip[:-1] / 2.0) * dphip_e - p_avg)
+    dJp_dphip_ep1 = -Q * mat.mu_p_edge / h_e * ((dp_dphip[1:] / 2.0) * dphip_e + p_avg)
 
-    dR_dn = (p * denom - num * mat.tau_p) / denom ** 2
-    dR_dp = (n * denom - num * mat.tau_n) / denom ** 2
+    dR_dn = (p * denom - num * mat.tau_p_arr) / denom ** 2
+    dR_dp = (n * denom - num * mat.tau_n_arr) / denom ** 2
 
     Rn[1:-1] = ((Jn[1:] - Jn[:-1]) / cvol_i - Q * R[1:-1]) / cont_scale
     Rp[1:-1] = ((Jp[1:] - Jp[:-1]) / cvol_i + Q * R[1:-1]) / cont_scale
@@ -267,29 +289,44 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                          f_tol=1e-9, maxiter=50, verbose=False):
     """Same signature/return shape as solver.gummel_solve and
     newton_solver.newton_gummel_solve, but solves for quasi-Fermi potentials
-    (phin, phip) instead of raw densities - see module docstring."""
-    N = len(x)
-    n_bc0, p_bc0 = contact_values(mat, Cdop[0])
-    n_bcL, p_bcL = contact_values(mat, Cdop[-1])
-    Vt = mat.Vt
+    (phin, phip) instead of raw densities - see module docstring.
 
+    mat may be a plain scalar Material (today's exact behavior) or a
+    core.materials.MaterialField (heterojunction) - normalized to a
+    MaterialField once here (`mf`), then used everywhere below and in every
+    helper this function calls (_residual_only/_residual_and_jacobian
+    require a MaterialField, per their own docstrings)."""
+    N = len(x)
+    mf = mat if isinstance(mat, MaterialField) else MaterialField.uniform(mat, x)
+    ni0, niL = mf.ni_arr[0], mf.ni_arr[-1]
+    dEi0, dEiL = mf.delta_Ei_arr[0], mf.delta_Ei_arr[-1]
+    n_bc0, p_bc0 = contact_values(mf, Cdop[0], ni=ni0)
+    n_bcL, p_bcL = contact_values(mf, Cdop[-1], ni=niL)
+    Vt = mf.Vt
+
+    # phin = psi + delta_Ei - Vt*ln(n/ni), phip = psi + delta_Ei + Vt*ln(p/ni)
+    # (inverting n=ni*exp((psi-phin+delta_Ei)/Vt), p=ni*exp((phip-psi-delta_Ei)/Vt)
+    # at each contact - delta_Ei=0 for a homojunction, reducing to today's
+    # exact formula bit-for-bit; verified by hand this gives phin_bc=phip_bc=Va
+    # at the biased contact and 0 at the grounded one regardless of which
+    # material each contact sits in, see the harmonic-snuggling-puddle plan).
     psi_bc = np.array([psi_eq[0] + Va, psi_eq[-1]])
-    phin_bc = np.array([psi_bc[0] - Vt * np.log(n_bc0 / mat.ni),
-                         psi_bc[-1] - Vt * np.log(n_bcL / mat.ni)])
-    phip_bc = np.array([psi_bc[0] + Vt * np.log(p_bc0 / mat.ni),
-                         psi_bc[-1] + Vt * np.log(p_bcL / mat.ni)])
+    phin_bc = np.array([psi_bc[0] - Vt * np.log(n_bc0 / ni0) + dEi0,
+                         psi_bc[-1] - Vt * np.log(n_bcL / niL) + dEiL])
+    phip_bc = np.array([psi_bc[0] + Vt * np.log(p_bc0 / ni0) + dEi0,
+                         psi_bc[-1] + Vt * np.log(p_bcL / niL) + dEiL])
 
     h_typ = np.min(np.diff(x))
-    poisson_scale = poisson_row_scale(mat, h_typ)
-    cont_scale = continuity_row_scale(mat, h_typ)
+    poisson_scale = poisson_row_scale(mf, h_typ)
+    cont_scale = continuity_row_scale(mf, h_typ)
     stall_res_threshold = 1.0
 
     def _gummel_start():
         from core.solver import gummel_solve
-        warm = gummel_solve(x, Cdop, mat, Va, psi_eq, n_eq, p_eq, max_gummel=15)
+        warm = gummel_solve(x, Cdop, mf, Va, psi_eq, n_eq, p_eq, max_gummel=15)
         return (warm["psi"].copy(),
-                warm["psi"] - Vt * np.log(warm["n"] / mat.ni),
-                warm["psi"] + Vt * np.log(warm["p"] / mat.ni))
+                warm["psi"] + mf.delta_Ei_arr - Vt * np.log(warm["n"] / mf.ni_arr),
+                warm["psi"] + mf.delta_Ei_arr + Vt * np.log(warm["p"] / mf.ni_arr))
 
     def _run_newton(psi0, phin0, phip0):
         """One full Newton attempt from a given starting point. Returns
@@ -300,7 +337,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
         phip0[0], phip0[-1] = phip_bc
 
         U = np.concatenate([psi0, phin0, phip0])
-        F, J = _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
+        F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
         res_norm = np.max(np.abs(F))
 
         it = 0
@@ -308,7 +345,24 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
         for it in range(1, maxiter + 1):
             if res_norm < f_tol:
                 break
-            delta = spla.spsolve(J, -F)
+            # Ruiz row/column equilibration before the sparse solve (see
+            # core/jacobian_scaling.py and tat/newton_solver_tat.py's own
+            # use of it) - mathematically exact/recoverable, just better-
+            # conditioned arithmetic. Needed for a real heterojunction: a
+            # material with a substantially different ni (e.g. SiGe's ~150x
+            # larger ni than Si) makes the Jacobian's dJn/dphin ~ -Q*mu*n
+            # entries span many more orders of magnitude across the device
+            # than any homojunction case does, stalling a plain spsolve's
+            # line search well short of convergence (confirmed directly: an
+            # un-equilibrated SiGe/Si solve stalled at |F|~15.7 with the
+            # step size collapsed to ~1e-6 and no further residual
+            # reduction found in 20 halvings - not a bad-Jacobian bug, an
+            # FD check at that exact stalled point matched to ~1e-7 relative
+            # error; equilibration alone resolves it). Applied
+            # unconditionally (not just when a heterojunction is detected)
+            # keeps one solve path, matching newton_solver_tat.py's own
+            # choice for the same reason.
+            delta = equilibrated_spsolve(J, -F)
             # Cap the raw phin/phip step: wherever a carrier's density is
             # near zero (deep in the bulk on the wrong side of the
             # junction, e.g. electrons on the p-side), that quasi-Fermi
@@ -325,7 +379,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
             step = 1.0
             for _ in range(20):
                 U_try = U + step * delta
-                F_try = _residual_only(U_try, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
+                F_try = _residual_only(U_try, x, Cdop, mf, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
                 res_try = np.max(np.abs(F_try))
                 if np.isfinite(res_try) and res_try < res_norm * (1 - 1e-4 * step):
                     break
@@ -334,7 +388,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                 U_try, res_try = U, res_norm
 
             U = U_try
-            F, J = _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
+            F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale)
             res_norm = np.max(np.abs(F))
             if verbose:
                 print(f"  Newton(QF) it {it}: |F|_inf={res_norm:.3e}  step={step:.3g}")
@@ -379,14 +433,14 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
             "check this point's self-consistency (J_std/J_mean) before trusting it.")
 
     psi, phin, phip = unpack_qf(U, N)
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
+    n = mf.ni_arr * np.exp((psi - phin + mf.delta_Ei_arr) / Vt)
+    p = mf.ni_arr * np.exp((phip - psi - mf.delta_Ei_arr) / Vt)
 
     # Report currents from THIS solver's own plain-gradient flux (not
     # physics.edge_currents' Scharfetter-Gummel formula) - the two
     # discretizations agree closely once converged, but using SG here would
     # silently mix formulations in the reported self-consistency check.
-    _, _, _, Jn, Jp, _, _, _ = _edge_quantities(psi, phin, phip, n, p, x, mat)
+    _, _, _, Jn, Jp, _, _, _ = _edge_quantities(psi, phin, phip, n, p, x, mf)
     Jtot = Jn + Jp
     J_interior = Jtot[1:-1] if len(Jtot) > 2 else Jtot
     J_rep = float(np.median(J_interior))

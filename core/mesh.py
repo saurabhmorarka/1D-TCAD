@@ -124,15 +124,37 @@ def _region_nodes(length: float, profile: DopingProfile, mat: Material,
 def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
                       bulk_spacing_debye_factor: float = 5.0,
                       junction_spacing_debye_factor: float = 0.05,
-                      avalanche_ii_refine: dict = None):
+                      avalanche_ii_refine: dict = None,
+                      mat_n: Material = None):
     """Build the nonuniform grid and doping profile for a step (or graded)
     p-n junction diode.
+
+    mat_n: optional SECOND material for the n-side (x>=0), making this a
+        real heterojunction diode - `mat` is always the p-side (x<0)
+        material. None (default): homojunction, `mat` used for both sides,
+        100% backward-compatible (mirrors build_mos_grid's Cdop_gate=None
+        pattern exactly - every existing call site passes one positional
+        `mat` and gets today's exact behavior, byte-for-byte). When given,
+        the mesh's own Debye-length sizing (h_min/h_max_p/h_max_n) already
+        computes each side from its OWN material via separate L_D_p/L_D_n
+        calls below, so a heterojunction's differing eps/doping is already
+        correctly resolved per side with no further change - only the
+        returned `mat_field`/`interfaces` are new.
 
     Returns dict with:
       x        : node positions, cm, x=0 at the junction, p-side negative
       Cdop     : net doping Nd-Na at each node, cm^-3
       junction_index : index of node closest to x=0
       Wp, Wn   : region lengths actually used
+      mat_field: core.materials.MaterialField - MaterialField.uniform(mat, x)
+                 for a homojunction (mat_n=None), or MaterialField.from_regions
+                 (mat, mat_n, ...) for a heterojunction - every solver
+                 function accepts either a plain Material (today's exact
+                 path) or this MaterialField in place of it.
+      interfaces: [] for a homojunction, or a single core.interfaces.Interface
+                 at the junction node for a heterojunction (Qit_cm2=0.0,
+                 electrically inert by default - same convention as
+                 build_mos_grid's oxide/substrate interface).
 
     avalanche_ii_refine: opt-in extra tightening of h_min for the avalanche
         breakdown solver (newton_solver_avalanche.py), OFF by default (None)
@@ -151,6 +173,12 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
     p_profile = dev.p_profile if dev.p_profile is not None else DopingProfile.flat(dev.Na)
     n_profile = dev.n_profile if dev.n_profile is not None else DopingProfile.flat(dev.Nd)
 
+    # mat_n_actual: the n-side's own material for every n-side-specific
+    # quantity below (Debye length, diffusion length, mesh generation) -
+    # defaults to `mat` (mat_n=None), so every quantity below is bit-for-bit
+    # identical to before for a homojunction.
+    mat_n_actual = mat_n if mat_n is not None else mat
+
     # h_min resolves the JUNCTION - it must be sized from the doping right
     # AT the interface (depth=0), not reference_concentration()'s
     # region-wide summary. Identical for a flat profile (sample(0) ==
@@ -163,7 +191,7 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
     # doping_profiles.py). Using the region-wide summary there would size
     # h_min off doping the mesh's finest cells never actually sit at.
     L_D_p = _debye_length(mat, _interface_concentration(p_profile))
-    L_D_n = _debye_length(mat, _interface_concentration(n_profile))
+    L_D_n = _debye_length(mat_n_actual, _interface_concentration(n_profile))
     L_D_min = min(L_D_p, L_D_n)
 
     # h_min (right at the junction) is shared, tied to the SHORTER Debye
@@ -211,12 +239,12 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
     # exponential decay resolved with a comfortable margin.
     min_cells_per_diffusion_length = 10.0
     h_max_p = max(bulk_spacing_debye_factor * L_D_p, mat.Ln / min_cells_per_diffusion_length)
-    h_max_n = max(bulk_spacing_debye_factor * L_D_n, mat.Lp / min_cells_per_diffusion_length)
+    h_max_n = max(bulk_spacing_debye_factor * L_D_n, mat_n_actual.Lp / min_cells_per_diffusion_length)
 
     Wp = dev.Wp if dev.Wp is not None else max(dev.n_diffusion_lengths * mat.Ln, 20 * L_D_p)
-    Wn = dev.Wn if dev.Wn is not None else max(dev.n_diffusion_lengths * mat.Lp, 20 * L_D_n)
+    Wn = dev.Wn if dev.Wn is not None else max(dev.n_diffusion_lengths * mat_n_actual.Lp, 20 * L_D_n)
 
-    x_n_side = _region_nodes(Wn, n_profile, mat, h_min, h_max_n, growth)          # 0 .. Wn
+    x_n_side = _region_nodes(Wn, n_profile, mat_n_actual, h_min, h_max_n, growth)  # 0 .. Wn
     x_p_side = -_region_nodes(Wp, p_profile, mat, h_min, h_max_p, growth)[::-1]   # -Wp .. 0
 
     x = np.concatenate([x_p_side[:-1], x_n_side])
@@ -225,12 +253,22 @@ def build_diode_grid(mat: Material, dev: Device, growth: float = 1.06,
     Cdop = np.where(x >= 0.0, n_profile.sample(x, Wn), -p_profile.sample(-x, Wp))
     junction_index = int(np.argmin(np.abs(x)))
 
+    from core.materials import MaterialField
+    if mat_n is not None:
+        mat_field = MaterialField.from_regions(mat, mat_n, x, junction_index)
+        interfaces = [Interface(node_index=junction_index, material_a="p-side", material_b="n-side")]
+    else:
+        mat_field = MaterialField.uniform(mat, x)
+        interfaces = []
+
     return {
         "x": x,
         "Cdop": Cdop,
         "junction_index": junction_index,
         "Wp": Wp,
         "Wn": Wn,
+        "mat_field": mat_field,
+        "interfaces": interfaces,
         "h_min": h_min,
         "h_max": max(h_max_p, h_max_n),
         "h_max_p": h_max_p,

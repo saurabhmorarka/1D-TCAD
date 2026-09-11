@@ -1,0 +1,86 @@
+# 1D diode simulation input parameters - REAL p-SiGe(0.4)/n-Si HETEROJUNCTION
+# TAT/BTBT leakage example.
+#
+# Run with: python3 -m tat.main_tat configs/input_diode_sige_pn.yaml
+#
+# A genuine heterojunction (not a same-material workaround): a heavily
+# doped p-type relaxed Si0.6Ge0.4 alloy side (1e20 cm^-3) against a lightly
+# doped n-type pure Si side (1e17 cm^-3) - see the harmonic-snuggling-puddle
+# plan for the full architecture (core.materials.MaterialField, the
+# Anderson's-rule delta_Ei(x) Boltzmann-relation correction threaded through
+# core/physics.py, core/solver.py, core/newton_solver_qf.py, and
+# tat/newton_solver_tat.py) and DEVELOPMENT_LOG.md for the session this was
+# added in. This is deliberately the RELAXED alloy (no strain correction) -
+# compressively strained SiGe is flagged as a future extension, not in
+# scope here.
+#
+# bowing_eV: 0.36 is chosen so AlloyMaterial("SixGe1-x", "Silicon",
+# "Germanium", bowing_eV=0.36).resolve(x_a=0.6) (i.e. Si_0.6 Ge_0.4) lands at
+# Eg ~= 0.85 eV, the standard Braunstein/People relaxed-alloy fit for this
+# composition - see core/material_db.py's derive_alloy() docstring.
+#
+# Domain sizing: NOT hand-picked here (see below) - left to
+# core.mesh.build_diode_grid's own auto-sizing (no thickness: block),
+# deliberately, after a hand-picked Wp_um=0.3 (mirroring
+# input_diode_drain_substrate.yaml's light/heavy-side reasoning, which
+# assumed the heavy side only needs to cover its own shallow depletion
+# penetration) turned out to be a real bug: SiGe's minority-carrier
+# (electron) diffusion length is ~2.5um (higher mobility than Si), so a
+# 0.3um p-side truncated the injected-carrier profile well before it
+# decayed, producing an artificial non-flat Jtot(x) near the truncated
+# p-contact (~70x the true current at some points) that looked exactly
+# like a solver convergence failure until traced to this mesh-sizing
+# cause. Auto-sizing (Wp = max(5*mat.Ln, 20*L_D_p), same for Wn) already
+# uses each side's OWN material's diffusion length correctly (see
+# build_diode_grid's mat_n handling) - trust it instead of a hand-picked
+# guess, per this project's own mesh-robustness principle.
+
+doping:
+  p_side:
+    type: flat
+    concentration_cm3: 1.0e20   # SiGe(0.4), heavily doped
+  n_side:
+    type: flat
+    concentration_cm3: 1.0e17   # Si, lightly doped
+
+material:
+  p_side:
+    name: SiGe_x0.4
+    alloy:
+      end_member_a: Silicon
+      end_member_b: Germanium
+      x_a: 0.6          # fraction Si -> Si0.6 Ge0.4
+      bowing_eV: 0.36   # calibrated so Eg(x_Ge=0.4) ~= 0.85 eV (Braunstein/People fit)
+  n_side:
+    name: Silicon
+
+mesh:
+  growth: 1.06
+  bulk_spacing_debye_factor: 5.0
+  junction_spacing_debye_factor: 0.05
+
+tat:
+  kane:
+    variant: quadratic   # quadratic (P=2, default) | three_half | linear - see tat/tat.py
+  hurkx:
+    m_t_over_m0: 0.25    # tunneling effective mass / free electron mass (Si literature default)
+    Et_minus_Ei_eV: 0.0  # trap level relative to intrinsic level; 0 = midgap (worst-case/typical)
+
+voltage_sweep:
+  # Both reverse (leakage) and forward, per the user's ask - reverse capped
+  # at -5V (normal-operation junction leakage, not a power-device breakdown
+  # study), forward through 0.6V (well past turn-on, same range as the
+  # homogeneous-Si comparison example).
+  reverse_start_V: -0.05
+  reverse_stop_V: -5.0
+  reverse_points: 40
+  forward_start_V: 0.0
+  forward_stop_V: 0.6
+  forward_points: 8
+
+solver:
+  math_model: newton_tat
+
+output:
+  save_bias_points: [-1, -2, -3, -4, -5]
+  structure_file: diode_sige_pn_structure.json

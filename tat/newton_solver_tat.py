@@ -44,8 +44,9 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from core.params import Q, Material
+from core.params import Q, KB, Material
 from core import physics as ph
+from core.materials import MaterialField
 from core.jacobian_scaling import equilibrated_spsolve
 from core.solver import contact_values
 from core.newton_solver_qf import poisson_row_scale, continuity_row_scale, unpack_qf, MAX_QF_STEP
@@ -93,6 +94,31 @@ def _node_field(psi, x):
     return F_node, dF_dpsi_im1, dF_dpsi_i, dF_dpsi_ip1
 
 
+class _NodeMaterialView:
+    """Lightweight per-node material view exposing the SAME attribute names
+    tat.tat's generation functions read as plain scalars (mat.ni, mat.Vt,
+    mat.T, mat.tau_n, mat.tau_p) - built from a MaterialField's arrays so
+    hurkx_tat_generation/schenk_tat_generation work UNCHANGED (duck-typed,
+    no edits to tat/tat.py needed) whether the device is a homojunction
+    (arrays are a repeated constant - elementwise arithmetic bit-identical
+    to the old scalar path) or a real heterojunction (arrays genuinely vary
+    node to node, e.g. across a SiGe/Si junction, so trap-assisted
+    generation correctly sees the LOCAL ni/tau at each interior node)."""
+    def __init__(self, ni, Vt, T, tau_n, tau_p):
+        self.ni, self.Vt, self.T, self.tau_n, self.tau_p = ni, Vt, T, tau_n, tau_p
+
+
+def _interior_node_view(mf: MaterialField) -> _NodeMaterialView:
+    """mf's arrays restricted to interior nodes (1..N-2), matching the
+    shape of n_i, p_i, F_node in _reff_and_derivs below. T is uniform
+    across the device (MaterialField only carries one Vt), recovered from
+    Vt=KB*T/Q."""
+    return _NodeMaterialView(
+        ni=mf.ni_arr[1:-1], Vt=mf.Vt, T=mf.Vt * Q / KB,
+        tau_n=mf.tau_n_arr[1:-1], tau_p=mf.tau_p_arr[1:-1],
+    )
+
+
 def _reff_and_derivs(n, p, psi, x, mat, kane_model, trap_model, trap_generation_fn):
     """Interior-node (length N-2) effective recombination rate
     Reff = R_trap - G_btbt and its partial derivatives w.r.t. n[i], p[i]
@@ -101,11 +127,17 @@ def _reff_and_derivs(n, p, psi, x, mat, kane_model, trap_model, trap_generation_
     trap_generation_fn is either hurkx_tat_generation or
     schenk_tat_generation (tat.tat) - both share the same
     (n, p, F_abs, mat, model) -> (G, dG_dn, dG_dp, dG_dF) signature, paired
-    with trap_model being the matching HurkxTATModel or SchenkTATModel."""
+    with trap_model being the matching HurkxTATModel or SchenkTATModel. mat
+    must already be a MaterialField (see newton_gummel_solve) - trap_generation_fn
+    is handed an _interior_node_view of it instead (per-node ni/Vt/T/tau_n/
+    tau_p, matching n_i/p_i/F_node's interior-node shape), so it correctly
+    sees the LOCAL material at a heterojunction without any change to
+    tat.tat's own generation-rate formulas."""
     F_node, dF_im1, dF_i, dF_ip1 = _node_field(psi, x)
     n_i, p_i = n[1:-1], p[1:-1]
 
-    G_tat, dGtat_dn, dGtat_dp, dGtat_dF = trap_generation_fn(n_i, p_i, F_node, mat, trap_model)
+    mat_node = _interior_node_view(mat)
+    G_tat, dGtat_dn, dGtat_dp, dGtat_dF = trap_generation_fn(n_i, p_i, F_node, mat_node, trap_model)
     G_btbt, dGbtbt_dF = btbt_generation(F_node, kane_model)
 
     R_trap = -G_tat
@@ -126,12 +158,12 @@ def _reff_and_derivs(n, p, psi, x, mat, kane_model, trap_model, trap_generation_
 def _edge_quantities(psi, phin, phip, n, p, x, mat):
     """Plain-gradient flux only (no R here - Reff is computed separately
     above, unlike newton_solver_qf.py's _edge_quantities which bundles
-    both)."""
+    both). mat must already be a MaterialField (see newton_gummel_solve)."""
     h = np.diff(x)
     n_avg = (n[:-1] + n[1:]) / 2.0
     p_avg = (p[:-1] + p[1:]) / 2.0
-    Jn = -Q * mat.mu_n * n_avg * (phin[1:] - phin[:-1]) / h
-    Jp = -Q * mat.mu_p * p_avg * (phip[1:] - phip[:-1]) / h
+    Jn = -Q * mat.mu_n_edge * n_avg * (phin[1:] - phin[:-1]) / h
+    Jp = -Q * mat.mu_p_edge * p_avg * (phip[1:] - phip[:-1]) / h
     return h, n_avg, p_avg, Jn, Jp
 
 
@@ -140,8 +172,8 @@ def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, con
     N = len(x)
     psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
+    n = mat.ni_arr * np.exp((psi - phin + mat.delta_Ei_arr) / Vt)
+    p = mat.ni_arr * np.exp((phip - psi - mat.delta_Ei_arr) / Vt)
     cvol = ph._control_volumes(x)
 
     Rpsi = np.empty(N)
@@ -154,8 +186,8 @@ def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, con
     h = np.diff(x)
     hm, hp = h[:-1], h[1:]
     cvol_i = cvol[1:-1]
-    lap_m = mat.eps / hm / cvol_i
-    lap_p = mat.eps / hp / cvol_i
+    lap_m = mat.eps_edge[:-1] / hm / cvol_i
+    lap_p = mat.eps_edge[1:] / hp / cvol_i
     Rpsi[1:-1] = (lap_p * (psi[2:] - psi[1:-1]) - lap_m * (psi[1:-1] - psi[:-2])
                   - Q * (n[1:-1] - p[1:-1] - Cdop[1:-1])) / poisson_scale
 
@@ -172,8 +204,8 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_sc
     N = len(x)
     psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
+    n = mat.ni_arr * np.exp((psi - phin + mat.delta_Ei_arr) / Vt)
+    p = mat.ni_arr * np.exp((phip - psi - mat.delta_Ei_arr) / Vt)
     cvol = ph._control_volumes(x)
 
     Rpsi = np.empty(N)
@@ -186,8 +218,8 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_sc
     h = np.diff(x)
     hm, hp = h[:-1], h[1:]
     cvol_i = cvol[1:-1]
-    lap_m = mat.eps / hm / cvol_i
-    lap_p = mat.eps / hp / cvol_i
+    lap_m = mat.eps_edge[:-1] / hm / cvol_i
+    lap_p = mat.eps_edge[1:] / hp / cvol_i
     Rpsi[1:-1] = (lap_p * (psi[2:] - psi[1:-1]) - lap_m * (psi[1:-1] - psi[:-2])
                   - Q * (n[1:-1] - p[1:-1] - Cdop[1:-1])) / poisson_scale
 
@@ -201,15 +233,15 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_sc
     dphin_e = phin[1:] - phin[:-1]
     dphip_e = phip[1:] - phip[:-1]
 
-    dJn_dpsi_e = -Q * mat.mu_n / h_e * (dn_dpsi[:-1] / 2.0) * dphin_e
-    dJn_dpsi_ep1 = -Q * mat.mu_n / h_e * (dn_dpsi[1:] / 2.0) * dphin_e
-    dJn_dphin_e = -Q * mat.mu_n / h_e * ((dn_dphin[:-1] / 2.0) * dphin_e - n_avg)
-    dJn_dphin_ep1 = -Q * mat.mu_n / h_e * ((dn_dphin[1:] / 2.0) * dphin_e + n_avg)
+    dJn_dpsi_e = -Q * mat.mu_n_edge / h_e * (dn_dpsi[:-1] / 2.0) * dphin_e
+    dJn_dpsi_ep1 = -Q * mat.mu_n_edge / h_e * (dn_dpsi[1:] / 2.0) * dphin_e
+    dJn_dphin_e = -Q * mat.mu_n_edge / h_e * ((dn_dphin[:-1] / 2.0) * dphin_e - n_avg)
+    dJn_dphin_ep1 = -Q * mat.mu_n_edge / h_e * ((dn_dphin[1:] / 2.0) * dphin_e + n_avg)
 
-    dJp_dpsi_e = -Q * mat.mu_p / h_e * (dp_dpsi[:-1] / 2.0) * dphip_e
-    dJp_dpsi_ep1 = -Q * mat.mu_p / h_e * (dp_dpsi[1:] / 2.0) * dphip_e
-    dJp_dphip_e = -Q * mat.mu_p / h_e * ((dp_dphip[:-1] / 2.0) * dphip_e - p_avg)
-    dJp_dphip_ep1 = -Q * mat.mu_p / h_e * ((dp_dphip[1:] / 2.0) * dphip_e + p_avg)
+    dJp_dpsi_e = -Q * mat.mu_p_edge / h_e * (dp_dpsi[:-1] / 2.0) * dphip_e
+    dJp_dpsi_ep1 = -Q * mat.mu_p_edge / h_e * (dp_dpsi[1:] / 2.0) * dphip_e
+    dJp_dphip_e = -Q * mat.mu_p_edge / h_e * ((dp_dphip[:-1] / 2.0) * dphip_e - p_avg)
+    dJp_dphip_ep1 = -Q * mat.mu_p_edge / h_e * ((dp_dphip[1:] / 2.0) * dphip_e + p_avg)
 
     (Reff, dReff_dn, dReff_dp,
      dReff_dpsi_im1, dReff_dpsi_i, dReff_dpsi_ip1) = _reff_and_derivs(
@@ -298,7 +330,12 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
     constructors in tat/tat.py if not given) and trap_generation_fn -
     hurkx_tat_generation (default) or schenk_tat_generation from tat.tat,
     paired with a matching HurkxTATModel or SchenkTATModel `trap_model`
-    (see plans/tat_btbt_plan.md's Hurkx-then-Schenk design)."""
+    (see plans/tat_btbt_plan.md's Hurkx-then-Schenk design).
+
+    mat may be a plain scalar Material (today's exact behavior) or a
+    core.materials.MaterialField (heterojunction) - normalized once here
+    (`mf`); see newton_solver_qf.newton_gummel_solve's own docstring for
+    the same pattern this mirrors."""
     kane_model = kane_model or KaneBTBTModel.si_kane_quadratic()
     if trap_model is None:
         trap_model = HurkxTATModel() if trap_generation_fn is _DEFAULT_TRAP_GENERATION_FN else trap_model
@@ -307,27 +344,30 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                           "(e.g. schenk_tat_generation needs a matching SchenkTATModel)")
 
     N = len(x)
-    n_bc0, p_bc0 = contact_values(mat, Cdop[0])
-    n_bcL, p_bcL = contact_values(mat, Cdop[-1])
-    Vt = mat.Vt
+    mf = mat if isinstance(mat, MaterialField) else MaterialField.uniform(mat, x)
+    ni0, niL = mf.ni_arr[0], mf.ni_arr[-1]
+    dEi0, dEiL = mf.delta_Ei_arr[0], mf.delta_Ei_arr[-1]
+    n_bc0, p_bc0 = contact_values(mf, Cdop[0], ni=ni0)
+    n_bcL, p_bcL = contact_values(mf, Cdop[-1], ni=niL)
+    Vt = mf.Vt
 
     psi_bc = np.array([psi_eq[0] + Va, psi_eq[-1]])
-    phin_bc = np.array([psi_bc[0] - Vt * np.log(n_bc0 / mat.ni),
-                         psi_bc[-1] - Vt * np.log(n_bcL / mat.ni)])
-    phip_bc = np.array([psi_bc[0] + Vt * np.log(p_bc0 / mat.ni),
-                         psi_bc[-1] + Vt * np.log(p_bcL / mat.ni)])
+    phin_bc = np.array([psi_bc[0] - Vt * np.log(n_bc0 / ni0) + dEi0,
+                         psi_bc[-1] - Vt * np.log(n_bcL / niL) + dEiL])
+    phip_bc = np.array([psi_bc[0] + Vt * np.log(p_bc0 / ni0) + dEi0,
+                         psi_bc[-1] + Vt * np.log(p_bcL / niL) + dEiL])
 
     h_typ = np.min(np.diff(x))
-    poisson_scale = poisson_row_scale(mat, h_typ)
-    cont_scale = continuity_row_scale(mat, h_typ)
+    poisson_scale = poisson_row_scale(mf, h_typ)
+    cont_scale = continuity_row_scale(mf, h_typ)
     stall_res_threshold = 1.0
 
     def _gummel_start():
         from core.solver import gummel_solve
-        warm = gummel_solve(x, Cdop, mat, Va, psi_eq, n_eq, p_eq, max_gummel=15)
+        warm = gummel_solve(x, Cdop, mf, Va, psi_eq, n_eq, p_eq, max_gummel=15)
         return (warm["psi"].copy(),
-                warm["psi"] - Vt * np.log(warm["n"] / mat.ni),
-                warm["psi"] + Vt * np.log(warm["p"] / mat.ni))
+                warm["psi"] + mf.delta_Ei_arr - Vt * np.log(warm["n"] / mf.ni_arr),
+                warm["psi"] + mf.delta_Ei_arr + Vt * np.log(warm["p"] / mf.ni_arr))
 
     def _run_newton(psi0, phin0, phip0):
         psi0 = psi0.copy(); phin0 = phin0.copy(); phip0 = phip0.copy()
@@ -336,7 +376,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
         phip0[0], phip0[-1] = phip_bc
 
         U = np.concatenate([psi0, phin0, phip0])
-        F, J = _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc,
+        F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc,
                                        poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn)
         res_norm = np.max(np.abs(F))
 
@@ -365,7 +405,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
             step = 1.0
             for _ in range(20):
                 U_try = U + step * delta
-                F_try = _residual_only(U_try, x, Cdop, mat, psi_bc, phin_bc, phip_bc,
+                F_try = _residual_only(U_try, x, Cdop, mf, psi_bc, phin_bc, phip_bc,
                                         poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn)
                 res_try = np.max(np.abs(F_try))
                 if np.isfinite(res_try) and res_try < res_norm * (1 - 1e-4 * step):
@@ -375,7 +415,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                 U_try, res_try = U, res_norm
 
             U = U_try
-            F, J = _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc,
+            F, J = _residual_and_jacobian(U, x, Cdop, mf, psi_bc, phin_bc, phip_bc,
                                            poisson_scale, cont_scale, kane_model, trap_model, trap_generation_fn)
             res_norm = np.max(np.abs(F))
             if verbose:
@@ -402,10 +442,10 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
             "check this point's self-consistency (J_std/J_mean) before trusting it.")
 
     psi, phin, phip = unpack_qf(U, N)
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
+    n = mf.ni_arr * np.exp((psi - phin + mf.delta_Ei_arr) / Vt)
+    p = mf.ni_arr * np.exp((phip - psi - mf.delta_Ei_arr) / Vt)
 
-    _, _, _, Jn, Jp = _edge_quantities(psi, phin, phip, n, p, x, mat)
+    _, _, _, Jn, Jp = _edge_quantities(psi, phin, phip, n, p, x, mf)
     Jtot = Jn + Jp
     J_interior = Jtot[1:-1] if len(Jtot) > 2 else Jtot
     J_rep = float(np.median(J_interior))

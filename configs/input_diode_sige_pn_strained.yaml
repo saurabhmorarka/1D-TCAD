@@ -1,0 +1,88 @@
+# 1D diode simulation input parameters - REAL p-SiGe(0.4)/n-Si HETEROJUNCTION
+# TAT/BTBT leakage example, COMPRESSIVELY STRAINED SiGe variant.
+#
+# Run with: python3 -m tat.main_tat configs/input_diode_sige_pn_strained.yaml
+#
+# Identical doping/geometry to configs/input_diode_sige_pn.yaml (the
+# RELAXED-alloy version) except material.p_side.alloy.strain is set below -
+# lets the user directly diff relaxed vs. strained I-V/leakage output for
+# the same doping/geometry. See the harmonic-snuggling-puddle plan and
+# DEVELOPMENT_LOG.md for the physics and the session this was added in.
+#
+# Physically realistic case: SiGe grown epitaxially on a Si substrate is
+# under biaxial compressive strain (SiGe's larger relaxed lattice constant
+# compressed in-plane to match Si's), NOT the relaxed alloy assumed in
+# input_diode_sige_pn.yaml. Strain changes the band alignment
+# STRUCTURALLY, not just Eg's number: almost the entire bandgap reduction
+# lands in the valence band (People & Bean, Appl. Phys. Lett. 48, 538
+# (1986)), delta_Ev(x_Ge)=0.74*x_Ge eV for growth on pure Si, delta_Ec~=0 -
+# see core.materials.strained_sige_on_si_offsets. At x_Ge=0.4:
+# delta_Ev~=0.296eV, Eg_strained~=1.12-0.296=0.824eV - numerically close to
+# the relaxed model's bowing-fit 0.85eV, but chi_eV barely moves from
+# Si's 4.05eV (vs. the relaxed model's Vegard-mixed ~4.03eV) - the actual
+# point of this comparison (see DEVELOPMENT_LOG.md for the side-by-side
+# chi_eV/Eg_eV/delta_Ei numbers).
+#
+# bowing_eV is left at the same 0.36 as the relaxed example for direct
+# comparability, but has NO EFFECT on the resolved Eg_eV_300K once strain
+# is active - resolve_strained() overrides Eg_eV_300K/chi_eV completely
+# via the delta_Ec/delta_Ev shifts, discarding the Vegard-mixed+bowing Eg
+# the (unused, for this field) internal resolve(x) call would have
+# produced (eps_r/Nc_300K/Nv_300K/mu_n/mu_p/tau_n/tau_p still come from
+# that same internal resolve(x) call, unchanged from the relaxed case -
+# see core.materials.AlloyMaterial.resolve_strained's own docstring for
+# what's explicitly scoped out: no valley-splitting DOS correction, no
+# strain-enhanced mobility, no critical-thickness/relaxation check).
+#
+# Domain sizing: left to auto-sizing (no thickness: block), same reasoning
+# as input_diode_sige_pn.yaml.
+
+doping:
+  p_side:
+    type: flat
+    concentration_cm3: 1.0e20   # strained SiGe(0.4), heavily doped
+  n_side:
+    type: flat
+    concentration_cm3: 1.0e17   # Si substrate, lightly doped
+
+material:
+  p_side:
+    name: SiGe_x0.4_strained
+    alloy:
+      end_member_a: Silicon
+      end_member_b: Germanium
+      x_a: 0.6          # fraction Si -> Si0.6 Ge0.4
+      bowing_eV: 0.36   # no effect on Eg once strain: is set (see header note)
+      strain:
+        substrate: Silicon
+        x_substrate_Ge: 0.0   # growth on pure Si (this project's only case so far)
+  n_side:
+    name: Silicon
+
+mesh:
+  growth: 1.06
+  bulk_spacing_debye_factor: 5.0
+  junction_spacing_debye_factor: 0.05
+
+tat:
+  kane:
+    variant: quadratic   # quadratic (P=2, default) | three_half | linear - see tat/tat.py
+  hurkx:
+    m_t_over_m0: 0.25    # tunneling effective mass / free electron mass (Si literature default)
+    Et_minus_Ei_eV: 0.0  # trap level relative to intrinsic level; 0 = midgap (worst-case/typical)
+
+voltage_sweep:
+  # Same range as input_diode_sige_pn.yaml, for direct comparability.
+  reverse_start_V: -0.05
+  reverse_stop_V: -5.0
+  reverse_points: 40
+  forward_start_V: 0.0
+  forward_stop_V: 0.6
+  forward_points: 8
+
+solver:
+  math_model: newton_tat
+
+output:
+  save_bias_points: [-1, -2, -3, -4, -5]
+  structure_file: diode_sige_pn_strained_structure.json

@@ -11,6 +11,7 @@ All quantities use this project's existing CGS-practical unit convention
 (see params.py's module docstring): length -> cm, energy -> eV where noted,
 concentration -> cm^-3.
 """
+import dataclasses
 from dataclasses import dataclass
 
 import numpy as np
@@ -106,6 +107,96 @@ class AlloyMaterial:
             varshni_beta_K=mix("varshni_beta_K"),
         )
 
+    def resolve_strained(self, x: float, substrate: str = "Silicon",
+                          x_substrate_Ge: float = 0.0) -> MaterialProperties:
+        """Compressively strained Si(1-x_Ge)Ge(x_Ge)-grown-on-`substrate`
+        MaterialProperties (see strained_sige_on_si_offsets()'s docstring
+        for the physics) - a SEPARATE method from resolve() (not a flag),
+        so the relaxed and strained compositions stay both directly
+        available/comparable, matching this project's existing swappable-
+        model pattern (Hurkx vs. Schenk TAT, the three Kane P-variants).
+
+        Starts from the SAME Vegard-mixed MaterialProperties resolve(x)
+        already produces: eps_r, Nc_300K, Nv_300K, mu_n, mu_p, tau_n, tau_p
+        are UNCHANGED from the relaxed case - explicitly scoped out, not a
+        silent gap (see the harmonic-snuggling-puddle plan's "what this
+        does NOT attempt" section: no valley-splitting DOS correction, no
+        strain-enhanced mobility, no critical-thickness/relaxation check).
+        Only Eg_eV_300K/chi_eV are overridden, via the delta_Ec/delta_Ev
+        shifts relative to the SUBSTRATE material's own Eg_eV_300K/chi_eV:
+            Eg_strained  = Eg_substrate + delta_Ec - delta_Ev
+            chi_strained = chi_substrate - delta_Ec
+        (Ec_substrate is the zero reference; Ev = Ec - Eg, so shifting Ec up
+        by delta_Ec and Ev down by delta_Ev - equivalently Ec up by
+        delta_Ec - widens the gap by delta_Ec on the conduction side and
+        narrows it by delta_Ev on the valence side, net Eg change =
+        delta_Ec - delta_Ev; chi = Evac - Ec, so raising Ec by delta_Ec
+        lowers chi by the same amount.)
+
+        x_Ge is resolved from THIS AlloyMaterial's own end-member identity
+        (whichever of end_member_a/end_member_b is "Germanium"), so the
+        SAME `x` convention resolve() uses (fraction of end_member_a)
+        still applies here - only the physics used to set Eg_eV_300K/
+        chi_eV changes; eps_r/Nc_300K/etc. still come from resolve(x) at
+        this identical x."""
+        from core import material_db
+
+        relaxed = self.resolve(x)
+
+        if self.end_member_a == "Germanium":
+            x_Ge = x
+        elif self.end_member_b == "Germanium":
+            x_Ge = 1.0 - x
+        else:
+            raise ValueError(
+                "resolve_strained only supports a Silicon/Germanium AlloyMaterial "
+                f"pair (got end_member_a={self.end_member_a!r}, "
+                f"end_member_b={self.end_member_b!r}) - the People & Bean strain "
+                "formula is Si/Ge-specific.")
+
+        substrate_props = material_db.get(substrate)
+        delta_Ec, delta_Ev = strained_sige_on_si_offsets(x_Ge, x_substrate_Ge)
+
+        return dataclasses.replace(
+            relaxed,
+            Eg_eV_300K=substrate_props.Eg_eV_300K + delta_Ec - delta_Ev,
+            chi_eV=substrate_props.chi_eV - delta_Ec,
+        )
+
+
+def strained_sige_on_si_offsets(x_Ge: float, x_Ge_substrate: float = 0.0):
+    """Compressively strained Si(1-x)Ge(x)-on-relaxed-Si(1-x')Ge(x') band
+    offsets (x = x_Ge, x' = x_Ge_substrate) - People & Bean, Appl. Phys.
+    Lett. 48, 538 (1986); consistent with Van de Walle & Martin, Phys. Rev.
+    B 34, 5621 (1986) (confirmed via web search). Under biaxial compressive
+    strain (SiGe's larger relaxed lattice constant compressed in-plane to
+    match a lower-Ge-fraction/pure-Si substrate), almost the ENTIRE bandgap
+    reduction from Ge alloying lands in the VALENCE band - qualitatively
+    different from the relaxed-alloy Vegard-mixed model (AlloyMaterial.
+    resolve()), which implicitly splits the bandgap difference between
+    conduction and valence bands however linear-mixed chi_eV/Nc/Nv happen
+    to place it:
+
+        delta_Ev(x) = (0.74 - 0.53*x') * x   eV
+        delta_Ec(x) ~= 0                     eV   (near-zero, "a few meV"
+            in the literature for this composition range - a standard
+            Type-I device-modeling simplification, NOT claimed to be
+            exactly zero; see the harmonic-snuggling-puddle plan's "what
+            this does NOT attempt" section for what else strain is known
+            to affect but isn't modeled here)
+
+    x_Ge_substrate=0.0 (growth on pure Si, this project's only case so
+    far) gives delta_Ev(x) = 0.74*x eV exactly - e.g. x=0.4 (Si0.6Ge0.4)
+    gives delta_Ev=0.296 eV. Returns (delta_Ec_eV, delta_Ev_eV), both >= 0
+    for x_Ge >= x_Ge_substrate (i.e. growing a HIGHER-Ge-fraction layer on
+    a lower-Ge-fraction/pure-Si substrate - the compressive-strain regime
+    this formula is fit to; growing a LOWER-Ge-fraction layer on a higher-
+    Ge-fraction substrate would be tensile strain, a different regime not
+    covered by this formula)."""
+    delta_Ev = (0.74 - 0.53 * x_Ge_substrate) * x_Ge
+    delta_Ec = 0.0
+    return delta_Ec, delta_Ev
+
 
 # ---- Temperature-dependent property formulas ----
 # T=300.0 (K) below is the reference temperature every MaterialProperties
@@ -154,6 +245,140 @@ def ni_at_T(props: MaterialProperties, T: float) -> float:
         )
     Vt = KB * T / Q
     return (nc * nv) ** 0.5 * np.exp(-eg / (2 * Vt))
+
+
+def Xi(mat: Material) -> float:
+    """Intrinsic-level-to-vacuum-level reference, Xi = chi + Vt*ln(Nc/ni)
+    (electron affinity plus how far Ei sits below Ec) - the material-only
+    (no psi, no mesh) quantity whose DIFFERENCE between two materials gives
+    the Anderson's-rule/electron-affinity-rule heterojunction band-offset
+    correction delta_Ei (see MaterialField's own docstring and
+    delta_Ei_of() below). Pure scalar algebra on one Material - used both
+    by MaterialField.from_regions() (mesh-aware, per-node/edge arrays) and
+    core.analytic's closed-form Vbi_hetero (mesh-independent), so the two
+    stay numerically identical by construction rather than by coincidence."""
+    return mat.chi_eV + mat.Vt * np.log(mat.Nc / mat.ni)
+
+
+def delta_Ei_of(mat: Material, mat_ref: Material) -> float:
+    """delta_Ei(mat) relative to mat_ref - see Xi()'s docstring. 0.0 exactly
+    when mat is mat_ref (or an identically-parameterized material), by
+    construction (Xi(mat)-Xi(mat)=0)."""
+    return Xi(mat) - Xi(mat_ref)
+
+
+@dataclass
+class MaterialField:
+    """Per-node/per-edge material properties - the general heterojunction-
+    capable sibling of a plain scalar Material, mirroring core.mesh's
+    existing per-node/per-edge precedent (build_mos_grid's eps_edge,
+    ni_arr, is_oxide). Every solver function that used to read a scalar
+    mat.<attr> is generalized to read the equivalent array here;
+    MaterialField.uniform() reproduces the old scalar behavior bit-for-bit
+    (the same constant broadcast into every array element - elementwise
+    multiplication by a repeated-constant array is bit-identical to
+    multiplying by the bare scalar, no reduction/reordering involved), so a
+    caller that never builds a heterojunction never needs to know this
+    class exists.
+
+    delta_Ei_arr is the Anderson's-rule/electron-affinity-rule band-offset
+    correction to this project's existing intrinsic-level Boltzmann
+    relations (see the harmonic-snuggling-puddle plan's physics section):
+        n(x) = ni(x) * exp((psi(x) - phin(x) + delta_Ei(x)) / Vt)
+        p(x) = ni(x) * exp((phip(x) - psi(x) - delta_Ei(x)) / Vt)
+    identically 0 for a homogeneous device (recovering today's exact
+    formula), and independent of every Newton unknown (psi, phin, phip),
+    so it never touches an existing Jacobian entry - only the forward n/p
+    evaluation (and the two places that invert it: equilibrium_bulk_potential
+    and each solver's phin_bc/phip_bc-from-contact-density derivation) gain
+    one added/subtracted term.
+    """
+    Vt: float                  # K, uniform across the device (single T assumed)
+    eps_edge: np.ndarray       # len(x)-1
+    mu_n_edge: np.ndarray      # len(x)-1
+    mu_p_edge: np.ndarray      # len(x)-1
+    ni_arr: np.ndarray         # len(x)
+    tau_n_arr: np.ndarray      # len(x)
+    tau_p_arr: np.ndarray      # len(x)
+    delta_Ei_arr: np.ndarray   # len(x), 0 in the reference region
+
+    @property
+    def Dn_edge(self) -> np.ndarray:
+        return self.mu_n_edge * self.Vt
+
+    @property
+    def Dp_edge(self) -> np.ndarray:
+        return self.mu_p_edge * self.Vt
+
+    @staticmethod
+    def uniform(mat: Material, x) -> "MaterialField":
+        """Constant arrays reproducing a single scalar Material everywhere -
+        delta_Ei_arr = 0 identically (no reference-material ambiguity when
+        there's only one material)."""
+        N = len(x)
+        return MaterialField(
+            Vt=mat.Vt,
+            eps_edge=np.full(N - 1, mat.eps),
+            mu_n_edge=np.full(N - 1, mat.mu_n),
+            mu_p_edge=np.full(N - 1, mat.mu_p),
+            ni_arr=np.full(N, mat.ni),
+            tau_n_arr=np.full(N, mat.tau_n),
+            tau_p_arr=np.full(N, mat.tau_p),
+            delta_Ei_arr=np.zeros(N),
+        )
+
+    @staticmethod
+    def from_regions(mat_p: Material, mat_n: Material, x, junction_index,
+                      ref: str = "n") -> "MaterialField":
+        """Stepped per-node/per-edge arrays for a p-side/n-side heterojunction
+        diode, matching core.mesh.build_diode_grid's own x<0=p-side, x>=0=
+        n-side convention exactly (so the node/edge material split is
+        position-based, consistent with how Cdop itself is assigned there -
+        junction_index, the node nearest x=0, is accepted for API symmetry
+        with that function but the actual split uses the same x>=0 test
+        Cdop uses, not the index, since the two can differ by one node when
+        the nearest-to-zero node happens to be on the negative side).
+
+        delta_Ei(x) = Xi(x) - Xi(reference material), Xi = chi + Vt*ln(Nc/ni)
+        (see MaterialField's own docstring) - ref selects which material's
+        Xi is the zero reference ("n", the default, matches the ohmic
+        n-side contact convention core.solver already uses as its Va=0
+        ground reference).
+
+        mat_p and mat_n must share the same T (Vt) - this project's
+        MaterialField only carries one Vt for the whole device (uniform-
+        temperature assumption); raises ValueError otherwise rather than
+        silently picking one.
+        """
+        if not np.isclose(mat_p.Vt, mat_n.Vt):
+            raise ValueError(
+                "MaterialField.from_regions requires mat_p and mat_n at the same "
+                f"temperature (mat_p.T={mat_p.T}K, mat_n.T={mat_n.T}K)")
+        if ref not in ("n", "p"):
+            raise ValueError(f"ref must be 'n' or 'p', got {ref!r}")
+
+        x = np.asarray(x, dtype=float)
+        N = len(x)
+
+        if ref == "n":
+            delta_Ei_p, delta_Ei_n = delta_Ei_of(mat_p, mat_n), 0.0
+        else:
+            delta_Ei_p, delta_Ei_n = 0.0, delta_Ei_of(mat_n, mat_p)
+
+        is_n_node = x >= 0.0
+        x_mid = (x[:-1] + x[1:]) / 2.0
+        is_n_edge = x_mid >= 0.0
+
+        return MaterialField(
+            Vt=mat_n.Vt,
+            eps_edge=np.where(is_n_edge, mat_n.eps, mat_p.eps),
+            mu_n_edge=np.where(is_n_edge, mat_n.mu_n, mat_p.mu_n),
+            mu_p_edge=np.where(is_n_edge, mat_n.mu_p, mat_p.mu_p),
+            ni_arr=np.where(is_n_node, mat_n.ni, mat_p.ni),
+            tau_n_arr=np.where(is_n_node, mat_n.tau_n, mat_p.tau_n),
+            tau_p_arr=np.where(is_n_node, mat_n.tau_p, mat_p.tau_p),
+            delta_Ei_arr=np.where(is_n_node, delta_Ei_n, delta_Ei_p),
+        )
 
 
 def resolve_material(props: MaterialProperties, T: float = 300.0) -> Material:

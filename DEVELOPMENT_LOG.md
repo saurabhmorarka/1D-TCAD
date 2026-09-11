@@ -2056,3 +2056,503 @@ target yet, so that would be speculative scaffolding rather than
 architecture that's actually needed. The next real engineering step
 becomes concrete once a specific 2D device or PDE target is chosen, at
 which point it gets its own fresh plan.
+
+## 19. Session 13: a real p-SiGe/n-Si heterojunction, per-node/edge
+`MaterialField`, and a Scharfetter-Gummel heterojunction correction the
+original plan missed
+
+Goal: a genuine heterojunction diode (p-type relaxed Si0.6Ge0.4, 1e20
+cm^-3, against n-type Si, 1e17 cm^-3) run through the existing TAT/BTBT
+reverse-leakage solver, per the harmonic-snuggling-puddle plan. Previously
+every solver in this project (`core/physics.py`, `core/solver.py`,
+`core/newton_solver_qf.py`, `tat/newton_solver_tat.py`) took one scalar
+`Material` for the whole device - `core/mesh.py`'s MOS grid builder
+(`build_mos_grid`) already had the per-node/edge array precedent
+(`eps_edge`, `ni_arr`, `is_oxide`) this generalizes to the diode.
+
+**Architecture, additive not a rewrite** (mirrors the MOS precedent
+exactly): new `core.materials.MaterialField` dataclass bundling
+`eps_edge`/`mu_n_edge`/`mu_p_edge` (per edge), `ni_arr`/`tau_n_arr`/
+`tau_p_arr`/`delta_Ei_arr` (per node), with `.uniform(mat, x)` (constant
+arrays, `delta_Ei=0`) and `.from_regions(mat_p, mat_n, x, junction_index)`
+(stepped arrays + the Anderson's-rule band-offset term, see below)
+constructors. Every touched function normalizes its `mat` argument to a
+`MaterialField` as its first step (`_as_field`/inline `isinstance` checks),
+so every existing call site passing a plain scalar `Material` gets
+bit-for-bit identical arithmetic (elementwise ops on a repeated-constant
+array equal the scalar op exactly) - confirmed by the full existing
+31-test suite (`python3 -m unittest discover -s testsuite`) passing
+unchanged after every step of this work.
+
+Files touched: `core/materials.py` (`MaterialField`), `core/material_db.py`
+(`derive_alloy()`, registering an `AlloyMaterial.resolve(x)` under a name -
+`bowing_eV=0.36` calibrates `Si0.6Ge0.4` to `Eg~=0.85eV`, the standard
+Braunstein/People relaxed-alloy fit), `core/mesh.py` (`build_diode_grid`
+gains `mat_n=None`, mirroring `build_mos_grid`'s `Cdop_gate=None` pattern;
+returns a new `mat_field`/`interfaces` pair), `core/physics.py`
+(`solve_poisson`'s new `delta_Ei=` override; a vectorized
+`equilibrium_bulk_potential_arr`; `srh_recombination`/`solve_continuity_n`/
+`solve_continuity_p`/`edge_currents` generalized to accept a `MaterialField`
+- see the SG correction below), `core/solver.py` (`solve_equilibrium`,
+`contact_values`, `gummel_solve` threaded through), `core/newton_solver_qf.py`
+and `tat/newton_solver_tat.py` (same diff pattern in both - the plain-
+gradient QF flux and Poisson charge term gain `delta_Ei`/per-edge-array
+generalizations; `tat/newton_solver_tat.py`'s trap-generation call sites
+get a new `_NodeMaterialView`/`_interior_node_view` shim so `tat/tat.py`'s
+own Hurkx/Kane/Schenk functions - which read `mat.ni`/`mat.Vt`/`mat.T`/
+`mat.tau_n`/`mat.tau_p` as scalars - work UNCHANGED via duck typing against
+per-node arrays, no edits to `tat/tat.py` needed), `core/config.py`
+(`material.p_side`/`material.n_side` sub-blocks, each shaped like today's
+`material:` block plus a new `alloy: {end_member_a, end_member_b, x_a,
+bowing_eV}` option; `build_from_config`'s return tuple ARITY is unchanged -
+the second material rides inside `mesh_opts["mat_n"]`, defaulting to
+`None`, specifically so every existing call site's fixed 7-value unpacking
+stays valid without being touched), new example `configs/input_diode_sige_pn.yaml`,
+`tat/main_tat.py` updated to thread `build_diode_grid`'s returned
+`mat_field` (not the bare scalar `mat`) through to `solve_equilibrium`/
+`voltage_sweep` - harmless (bit-identical) for every existing homojunction
+config, required for the new heterojunction one to actually get real
+per-region physics instead of a same-material silent workaround.
+
+**The physics: a per-node `delta_Ei(x)` Boltzmann-relation offset** (the
+plan's own derivation, applied as designed): `Xi(x) = chi(x) +
+Vt*ln(Nc(x)/ni(x))`, `delta_Ei(x) = Xi(x) - Xi(n-side reference)`, folded
+into `n = ni(x)*exp((psi-phin+delta_Ei)/Vt)`, `p = ni(x)*exp((phip-psi-
+delta_Ei)/Vt)` everywhere this project's Boltzmann relation appears
+(`solve_poisson`, both QF/TAT Newton solvers' residual, `equilibrium_bulk_
+potential`'s vectorized sibling, and each solver's `phin_bc`/`phip_bc`-
+from-contact-density derivation, which needs `delta_Ei` ADDED BACK once
+inverting `n`/`p`->`phin`/`phip` at a contact - verified by hand and
+numerically that `phin_bc=phip_bc=Va` exactly regardless of which
+material a contact sits in). `delta_Ei=0` everywhere for a homojunction,
+and it never depends on any Newton unknown, so it never touches an
+existing Jacobian entry (confirmed by the FD checks below) - exactly as
+planned.
+
+**What the plan got wrong, found and fixed this session**: the plan
+asserted `solve_continuity_n`/`solve_continuity_p` (the Scharfetter-Gummel
+flux `core/solver.py`'s Gummel warm-start relies on) needed "no new term,"
+reasoning only about the SRH mass-action term. Wrong - and the bug was
+loud: the very first heterojunction sweep showed a ~4-order-of-magnitude
+spurious current spike at exactly the mesh edge straddling the SiGe/Si
+interface, with `Jtot` everywhere else clean. Root cause, worked out by
+hand and confirmed numerically: SG's flux `Jn = coef*(n_{i+1}*B(u_{i+1}-
+u_i) - n_i*B(u_i-u_{i+1}))` is exactly zero iff `n_{i+1}/n_i =
+exp(u_{i+1}-u_i)` (using the Bernoulli identity `B(-y)=exp(y)*B(y)`).
+Plain `u=psi/Vt` satisfies this at equilibrium for a HOMOJUNCTION because
+`n0_i = ni*exp(u_i)` has the SAME constant prefactor `ni` at every node,
+which cancels in the ratio. At a heterojunction `ni(x)` itself steps
+(SiGe's ni is ~150x Si's here) - so even adding `delta_Ei` into `u` (a
+narrower, first-guess fix that turned out necessary but NOT sufficient)
+still leaves a node-dependent prefactor and a residual spurious current.
+The correct, verified-by-hand fix folds `ln(ni(x))` into the Bernoulli
+argument too, with an OPPOSITE sign for electrons vs. holes:
+`u_n(x) = (psi(x)+delta_Ei(x))/Vt + ln(ni(x))`,
+`u_p(x) = (psi(x)+delta_Ei(x))/Vt - ln(ni(x))`
+(new `physics._sg_potential_n`/`_sg_potential_p`, used by
+`solve_continuity_n`/`_p` and `edge_currents`, each needing their OWN `u`
+now instead of one shared array). Both reduce to `psi/Vt` plus a *global*
+additive constant for a homojunction (`ln(ni)` is the same everywhere),
+which Bernoulli's difference-only argument cancels exactly - bit-identical
+to before, confirmed by the unchanged 31-test suite. This is the value of
+this project's own "test the discretization against a known analytic
+fixed point" discipline (equilibrium zero-current) - it caught a genuine,
+non-obvious gap in the hand-derived plan before it corrupted every Gummel
+warm start silently.
+
+**Also needed, once traced**: the heterojunction Newton(QF) Jacobian has
+a MUCH larger entry-magnitude spread than any homojunction case this
+project has hit before (SiGe's ~150x larger `ni` directly amplifies
+`dJn/dphin ~ -q*mu*n` terms unevenly across the two materials) - a plain
+`spla.spsolve` stalled the line search at a fixed, non-decreasing residual
+even after the SG fix above. Switched `core/newton_solver_qf.py`'s solve
+step to `core.jacobian_scaling.equilibrated_spsolve` (Ruiz row/column
+equilibration, already used by `tat/newton_solver_tat.py` for the same
+reason with Schenk's generation term) - mathematically exact, just
+better-conditioned arithmetic; applied unconditionally, matching
+`newton_solver_tat.py`'s own "one solve path" choice. Confirmed via a
+finite-difference Jacobian check done AT a near-stalled point (not just a
+cold start) that this was never a Jacobian correctness bug (FD agreement
+~1e-7 to 1e-10 relative, both before and after equilibration) - purely a
+conditioning/line-search problem, exactly the class of issue
+`jacobian_scaling.py`'s own docstring documents.
+
+**A real bug in the new config's own hand-picked mesh thickness**, found
+via the same "trace the exact `Jtot` outlier location" discipline: the
+first `input_diode_sige_pn.yaml` draft hand-set `Wp_um: 0.3` (mirroring
+`input_diode_drain_substrate.yaml`'s light/heavy-side domain-sizing
+reasoning) without checking it against SiGe's own minority-carrier
+(electron) diffusion length - SiGe's higher electron mobility gives
+`Ln~2.5um`, ~8x longer than the hand-picked 0.3um domain, truncating the
+injected-carrier profile well before it decayed and producing a
+non-flat, ~70x-too-large `Jtot(x)` artifact near the truncated p-contact
+that looked exactly like a solver convergence failure. Fixed by removing
+the `thickness:` override entirely and trusting `build_diode_grid`'s own
+auto-sizing (`Wp=max(5*mat.Ln, 20*L_D_p)`, already using each side's OWN
+material correctly) - per this project's own mesh-robustness principle
+(pinned memory: solvers/examples should not depend on a manually
+guessed domain size).
+
+**Verification results**:
+- `MaterialField.uniform()`/`.from_regions(mat_p=mat_n=Silicon)` both give
+  `delta_Ei_arr` all zero (checked standalone).
+- Full existing 31-test suite passes unchanged after every step (materials,
+  mesh, physics, solver, both Newton solvers, config) - zero regression on
+  every existing scalar-material example.
+- Finite-difference Jacobian check, `newton_solver_qf.py`, at a genuinely
+  heterogeneous (SiGe/Si) point: 15 random entries, relative error ~2e-10
+  to ~2e-9 for all but one (1.15e-7, still tiny) - Jacobian confirmed
+  correct.
+- Same check, `tat/newton_solver_tat.py` (with Hurkx+Kane active): 15
+  random entries, ~3e-10 to ~9e-10 for 14 of 15, one at 7.5e-3 relative
+  error on a very small-magnitude entry (traced to a branch-function
+  numerical-precision edge, not a sign/structural bug - matches this
+  project's own "check the VALUE, not just smallness" discipline: a
+  single outlier at a branch boundary, not a consistent 2x/-1x pattern
+  across many entries).
+- Equilibrium (Va=0) self-consistency for the shipped SiGe/Si example:
+  `J_mean` (median interior) exactly 0.0, `J_std~9.7e-5 A/cm^2`,
+  `max|Jtot|~8.4e-4 A/cm^2` - negligible against any real operating
+  current density (~1e3 A/cm^2 at 0.6V forward), confirming the SG
+  heterojunction fix is doing its job at exactly the case it targets.
+- Full reverse (-0.05 to -5V) + forward (0 to 0.6V) sweep: forward bias
+  converges cleanly (self-consistency ~1e-4 to ~1e-5 by 0.5-0.6V, matching
+  homojunction quality). Reverse-bias leakage self-consistency is GREATLY
+  improved by the SG+equilibration fixes above (currents are now smooth
+  and monotonic in Va, vs. wildly non-monotonic/wrong-sign before) but is
+  NOT fully clean - `J_std/J_mean` ratios of ~1-6 remain at several
+  reverse points, with `newton_solver_qf.py`'s own stall warning still
+  firing at some of them. Traced this as far as time allowed: it is a
+  genuine residual floor (confirmed via FD check at the stalled point
+  itself, not a Jacobian bug), not fixed by more Gummel warm-start
+  iterations (converges to the identical stalled `|F|` regardless of warm-
+  start quality past ~60 Gummel iterations) or by removing `MAX_QF_STEP`
+  clipping (the actual proposed step there is tiny, ~4e-3V, not clipped).
+  **Left as an open item** - this doping/material combination (a ~150x
+  `ni` ratio ON TOP OF the ~1e17/1e20 doping asymmetry this project has
+  separately validated before) is harder than anything previously
+  resolved, and forcing a fix within this session's remaining budget risked
+  papering over a real remaining numerics gap rather than fixing it.
+- SiGe vs. homogeneous-Si leakage comparison (against
+  `configs/input_diode_drain_substrate.yaml`, same 1e17/1e20 doping RATIO):
+  at matched |Va|, the new SiGe/Si example's leakage came out slightly
+  LOWER, not higher, than the pure-Si comparison (e.g. -0.81V: 3.8e-10A
+  vs. 5.7e-10A; -4.24V: 1.33e-9A vs. 2.00e-9A). This is NOT the naively
+  expected "narrower gap -> more leakage" result, but it has a sound
+  physical explanation rather than being a bug: the user's requested doping
+  (p-SiGe HEAVY at 1e20, n-Si LIGHT at 1e17) puts essentially all the
+  depletion width - and therefore the high-field tunneling-generation
+  region - on the LIGHT n-Si side, not the narrow-gap SiGe side (which,
+  being heavily doped, barely depletes at all). SiGe's narrower gap can
+  only show up as MORE leakage if the high-field region actually sits in
+  the SiGe material - which would need the SiGe side to be the lightly
+  doped one, or a more comparably-doped junction. **Flagged as a real,
+  not-yet-resolved finding**, not silently reported as a success: proving
+  the narrow-gap-leakage effect needs a follow-up doping configuration
+  (SiGe on the light side) run as a second, deliberately contrasting
+  example, not the one this session shipped.
+
+Not done this session, explicitly deferred: `input_diode_sige_pn.yaml`'s
+own reverse-bias self-consistency is not yet as clean as the homojunction
+baseline (see above) - revisit once a specific next need justifies more
+time on it; no attempt was made at a SiGe-side-light doping variant to
+actually demonstrate the narrow-gap leakage enhancement (see above); no
+strained-SiGe model (out of scope, this was deliberately the relaxed
+alloy only, per the plan).
+
+## 20. Session 13 (continued): closed-form TAT/BTBT leakage validation,
+and a real output-clobbering bug in `tat/main_tat.py`
+
+Two follow-up gaps from session 13's SiGe/Si work, raised directly by the
+user: no way to actually see the output plots, and no independent
+(non-PDE) closed form to validate the TAT/BTBT leakage `I(Va)` curve
+against - this project already had closed forms for the plain diode
+(`built_in_potential`/`depletion_widths`/`shockley_current`) and avalanche
+(`breakdown_voltage_sze`/`ionization_integral`), but nothing for TAT/BTBT.
+
+**Real bug found and fixed**: `tat/main_tat.py` wrote every run's plots/CSV
+to the SAME fixed `out/tat/tat_iv.{csv,png}` regardless of which input
+config was passed - confirmed directly (checked `tat_iv.csv`'s content
+against the two configs' known numeric fingerprints) that running
+`input_diode_sige_pn.yaml` after `input_diode_drain_substrate.yaml` would
+silently overwrite the Si-only case's outputs in place. Fixed by deriving a
+per-config output subdirectory from the input config's own basename
+(`out/tat/<config_basename>/`) - not from `output.structure_file`, since
+the config filename is always present and always unique per run, while
+`structure_file` is an optional config value. Re-ran both configs; each
+now has its own complete, independent output set (paths listed below).
+
+**`core/analytic.py` generalized to `mat_p`/`mat_n` (mat_n=None default -
+the SAME backward-compat pattern as `mesh.build_diode_grid`'s own
+`mat_n=None`), so ONE implementation covers both the homogeneous-Si and
+heterojunction SiGe/Si cases**:
+
+- `built_in_potential`/`depletion_widths` gain an optional `mat_n=`
+  argument (existing 2-3-positional-arg call sites everywhere in the
+  codebase are unaffected - confirmed by the unchanged 31-test suite).
+  `Vbi_hetero` is built from each side's own EXACT bulk equilibrium
+  potential (`core.physics.equilibrium_bulk_potential`, material-only, no
+  solve) minus that side's `delta_Ei` - reusing `core.materials.Xi()`/
+  `delta_Ei_of()` (newly factored out of `MaterialField.from_regions`,
+  itself unchanged behavior, confirmed by the unchanged test suite) rather
+  than re-deriving the same quantity twice. Verified NUMERICALLY that
+  passing `mat_n=mat_p` reproduces the homojunction `Vbi` to ~1e-14
+  (floating-point noise, not merely "close").
+  Two-material depletion widths: charge balance `Na*xp=Nd*xn` still holds
+  regardless of `eps_p`/`eps_n` (D-field continuity reduces to it exactly
+  - `D_max_p=q*Na*xp`, `D_max_n=q*Nd*xn`, equal by construction); solving
+  `V=(q/2)*(Na*xp^2/eps_p+Nd*xn^2/eps_n)` for `xn` and verified BY HAND
+  that setting `eps_p=eps_n` reduces the result ALGEBRAICALLY EXACTLY
+  (not approximately) to the pre-existing homojunction formula - confirmed
+  numerically too (same ~1e-14 agreement).
+- `generation_current_srh(mat_p, dev, Va, mat_n=None)`: the plain (F=0,
+  no tunneling) SRH depletion-generation current, `J=q*[ni_p/(tau_n_p+
+  tau_p_p)*xp + ni_n/(tau_n_n+tau_p_n)*xn]`. Verified the `ni/(tau_n+
+  tau_p)` generation rate matches `tat.tat.hurkx_tat_generation` EXACTLY
+  at `Gamma=0` (F=0), `n=p=0` (full depletion), `Et=Ei` (the default trap
+  level) - worked out by hand before trusting the formula, not assumed.
+- `generation_current_tat(mat_p, dev, Va, hurkx_model, kane_model,
+  mat_n=None)`: the field-enhanced closed form, integrating (`np.trapz`,
+  matching `ionization_integral`'s own quadrature style) `[ni/(tau_n+
+  tau_p)]*(1+Gamma(F(x)))` (Hurkx) plus the separately additive
+  `G_btbt(F(x))` (Kane) over the depletion approximation's TRIANGULAR
+  field profile (`E_p(x)=E_max_p*(1-|x|/xp)`, `E_n(x)=E_max_n*(1-x/xn)`,
+  `E_max` from `D=eps*E` continuity). Deliberately reuses `tat.tat.
+  hurkx_gamma`/`btbt_generation` directly (the SAME fitted models the
+  numeric solver uses) - this validates the SOLVER's own discretization/
+  BC/mesh machinery against an independent field profile and quadrature,
+  not `tat.py`'s formulas themselves (already covered by their own
+  standalone `tat.tat.sanity_probe()`).
+
+**Wired into `tat/main_tat.py`**: both closed-form curves computed across
+the full reverse sweep, overlaid as dotted reference lines on both the
+linear and log `I(Va)` panels (against the numeric TAT+BTBT and
+no-tunneling curves), written to the per-config CSV as two extra columns,
+and printed as a numeric comparison table (numeric vs. closed-form I and
+their ratio, at 8 representative reverse-bias points) alongside the
+existing self-consistency printout.
+
+**Verification / results** (full 31-test suite still passes unchanged
+throughout):
+
+- `input_diode_drain_substrate.yaml` (homogeneous Si): numeric-TAT vs.
+  closed-form-TAT ratio runs from 0.061 (Va=-0.05V) up to 0.74 (Va=-5V);
+  numeric-noTAT vs. closed-form-SRH ratio from 0.059 to 0.70 - same
+  pattern, same order of magnitude throughout, monotonically closing the
+  gap as bias deepens.
+- `input_diode_sige_pn.yaml` (SiGe/Si heterojunction): nearly IDENTICAL
+  ratio pattern - 0.062 to 0.67 (TAT), 0.058 to 0.62 (SRH) - confirming the
+  closed form's heterojunction generalization behaves consistently with
+  the homojunction case, not just algebraically-verified in isolation.
+- **Where they agree well**: the numeric and closed-form curves track each
+  other within a factor of ~1.3-16x throughout the ENTIRE reverse sweep on
+  BOTH configs, converging to within ~1.3-1.4x at the deepest bias points
+  (-4 to -5V) - this is exactly the trend expected: the closed form's
+  triangular-field/depletion-approximation gets more accurate as the
+  numeric solution's own field profile becomes more sharply peaked and
+  triangle-like under deeper reverse bias.
+- **Where/why they don't agree exactly** (expected approximation gaps, not
+  bugs - both curves being systematically smaller in magnitude than the
+  numeric TAT/no-TAT curves near Va~0, by up to ~16x, is the dominant
+  mismatch): (1) the closed form assumes n=p=0 EXACTLY throughout the
+  depletion region (the textbook "full depletion" assumption) - the real
+  numeric solution has nonzero, bias-dependent carrier densities there,
+  most significant near equilibrium where injected/thermal carriers are
+  NOT negligible relative to the (still small) reverse-bias generation
+  current, weakening exactly as bias deepens and generation dominates
+  (matches the observed ratio trend closing with |Va|); (2) the
+  depletion-approximation's abrupt-edge triangular field profile
+  systematically UNDERSTATES the true self-consistent field's smoother,
+  more gradually-decaying shape and the true depletion width (this
+  project's own numeric solve is NOT a hard-wall depletion approximation),
+  so the closed form's integrated generation is a biased estimate in a
+  fixed, not-obviously-corrected direction; (3) series/contact effects and
+  the exact mesh/BC treatment at the ohmic contacts (not modeled at all in
+  the closed form) contribute additional, smaller differences. None of
+  these individually or together explain a wrong SIGN, wrong ORDER OF
+  MAGNITUDE, or non-monotonic trend - the observed gap is consistent with
+  known, named approximations the closed form deliberately makes, not
+  evidence of a solver bug.
+
+**Final output paths** (both re-run fresh this session, previously-
+clobbered top-level `out/tat/tat_iv.{csv,png}` restored to its original
+pre-session content via `git checkout`):
+- `out/tat/input_diode_drain_substrate/tat_iv.csv`,
+  `out/tat/input_diode_drain_substrate/tat_iv.png`,
+  `out/tat/input_diode_drain_substrate/tat_bands.png`,
+  `out/tat/input_diode_drain_substrate/diode_drain_substrate_structure.json`
+- `out/tat/input_diode_sige_pn/tat_iv.csv`,
+  `out/tat/input_diode_sige_pn/tat_iv.png`,
+  `out/tat/input_diode_sige_pn/tat_bands.png`,
+  `out/tat/input_diode_sige_pn/diode_sige_pn_structure.json`
+
+Not done this session: no attempt to close the SiGe/Si case's remaining
+reverse-bias self-consistency gap (session 13's own open item, unrelated
+to this closed-form validation work); no closed-form BTBT-only or
+Hurkx-only decomposition curve (only the combined TAT+BTBT and plain-SRH
+curves were added, matching what the numeric solver itself reports).
+
+## 21. Session 14: compressively strained Si(1-x)Ge(x)-on-Si band offsets
+(People & Bean), reusing last session's `delta_Ei` machinery unmodified
+
+Follow-up to sessions 13/13-continued's relaxed-alloy SiGe/Si heterojunction
+work. The user wants the physically realistic case: SiGe grown epitaxially
+on a Si substrate is under biaxial compressive strain (SiGe's larger
+relaxed lattice constant compressed in-plane to match Si's), not the
+relaxed alloy assumed before. Strain changes the band alignment
+STRUCTURALLY, not just `Eg`'s scalar number: literature (People & Bean,
+*Appl. Phys. Lett.* 48, 538 (1986); consistent with Van de Walle & Martin,
+*Phys. Rev. B* 34, 5621 (1986), confirmed via web search) is consistent
+that almost the ENTIRE bandgap reduction from Ge alloying lands in the
+VALENCE band under compressive strain:
+`delta_Ev(x)=(0.74-0.53*x')*x eV`, `delta_Ec(x)~=0` (x'=substrate Ge
+fraction, "a few meV" in the literature, standard Type-I device-modeling
+simplification) - for growth on pure Si (x'=0), `delta_Ev(x)=0.74*x eV`.
+Qualitatively different from the relaxed-alloy Vegard-mixed model (which
+implicitly splits the bandgap difference between conduction and valence
+bands however linear-mixed `chi_eV`/`Nc`/`Nv` happen to place it).
+
+**Confirmed the architecture claim from last session's own scoping note
+before building anything**: `core/materials.py`'s `Xi()`/`delta_Ei_of()`
+(the heterojunction Boltzmann-relation machinery `MaterialField.
+from_regions` already uses) is derived purely from each region's own
+`chi_eV`/`Nc`/`ni` on a `Material` object - it genuinely does not care
+whether those came from Vegard mixing or a strain model. This session's
+whole implementation is therefore additive: a new material-RESOLUTION
+path producing a `Material` with strain-corrected `chi_eV`/`Eg_eV`, with
+NOTHING in `mesh.py`/`physics.py`/`solver.py`/`newton_solver_qf.py`/
+`newton_solver_tat.py`/`analytic.py` needing to change - confirmed true in
+practice, not just in theory (every one of those files is untouched this
+session).
+
+**What was added**:
+- `core/materials.py`: `strained_sige_on_si_offsets(x_Ge, x_Ge_substrate=0.0)
+  -> (delta_Ec_eV, delta_Ev_eV)` implementing the People & Bean formula
+  above (docstring cites the source and states the `delta_Ec~=0`
+  simplification explicitly, not silently). `AlloyMaterial.
+  resolve_strained(x, substrate="Silicon", x_substrate_Ge=0.0)`: starts
+  from the SAME Vegard-mixed `MaterialProperties` the existing `resolve(x)`
+  already produces (so `eps_r`/`Nc_300K`/`Nv_300K`/`mu_n`/`mu_p`/`tau_n`/
+  `tau_p` are UNCHANGED from the relaxed case - explicitly scoped out per
+  the harmonic-snuggling-puddle plan's "what this does NOT attempt"
+  section: no valley-splitting DOS correction, no strain-enhanced
+  mobility, no critical-thickness/relaxation check, all three documented
+  as known simplifications, not silent gaps), then overrides ONLY
+  `Eg_eV_300K`/`chi_eV` via the `delta_Ec`/`delta_Ev` shifts relative to
+  the substrate material's own values. Kept as a SEPARATE method from
+  `resolve()` (not a flag), matching this project's existing swappable-
+  model pattern (Hurkx vs. Schenk TAT, the three Kane P-variants) - so
+  relaxed and strained stay both directly available/comparable. `x_Ge` is
+  resolved from the `AlloyMaterial`'s own end-member identity (whichever
+  of `end_member_a`/`end_member_b` is `"Germanium"`), so both the existing
+  `end_member_a=Silicon` config convention AND a `end_member_a=Germanium`
+  convention work correctly with the same `x` argument `resolve()` uses.
+- `core/material_db.py`: `derive_alloy()` gains optional `strained_on`/
+  `x_substrate_Ge` pass-through to call `resolve_strained` instead of
+  `resolve` when given.
+- `core/config.py`: `material.p_side.alloy` gains an optional
+  `strain: {substrate, x_substrate_Ge}` key - omitted (as in the existing
+  relaxed example) keeps today's exact relaxed behavior.
+- New example config `configs/input_diode_sige_pn_strained.yaml`, identical
+  doping/geometry/voltage-sweep to `configs/input_diode_sige_pn.yaml`
+  (the relaxed version) with `material.p_side.alloy.strain` set, so the
+  two can be diffed directly for the same doping/geometry.
+- `tat/main_tat.py`: no code change needed (already generic over
+  `mat_p`/`mat_n` since last session) - just run it against the new
+  config; per-config output directories (fixed last session) keep this
+  run's plots separate.
+
+**Verification**:
+- Full test suite: 37 tests now (31 original + 6 new
+  `TestStrainedSiGeOffsets` cases in `testsuite/test_materials.py`), all
+  pass. New tests cover: the offsets formula itself
+  (`x_Ge=0.4,x'=0 -> delta_Ev=0.296eV` exactly); `resolve_strained(0.0)`
+  reduces exactly to the substrate (`Eg`/`chi` match Silicon's catalog
+  values); `resolve_strained(0.4)` matches People & Bean
+  (`Eg=1.12-0.296=0.824eV`, `chi` unchanged from Si's 4.05eV since
+  `delta_Ec=0`); `eps_r`/`Nc_300K`/`Nv_300K`/`mu_n`/`mu_p`/`tau_n`/`tau_p`
+  are IDENTICAL between `resolve_strained(0.4)` and `resolve(0.4)` (same
+  object fields, confirming only `Eg`/`chi` were touched) while `Eg`/`chi`
+  themselves genuinely differ (confirming the override actually happened,
+  not a no-op); the actual shipped config's `end_member_a=Silicon,
+  x_a=0.6` convention gives the identical numeric result to an
+  `end_member_a=Germanium, x_Ge=0.4` fixture (both conventions correct);
+  a non-Si/Ge `AlloyMaterial` raises `ValueError` rather than silently
+  computing something wrong.
+- **The actual numbers, side by side** (printed directly from
+  `core.config.build_from_config` on both shipped configs, confirming the
+  qualitative distinction the user asked to see - not just Eg's scalar
+  number):
+  ```
+  RELAXED:   p-side(SiGe) chi_eV=4.0300  Eg_eV=0.8496   delta_Ei(p-node)=-0.1565 eV
+  STRAINED:  p-side(SiGe) chi_eV=4.0500  Eg_eV=0.8240   delta_Ei(p-node)=-0.1493 eV
+  (both cases: n-side(Si) chi_eV=4.0500  Eg_eV=1.1200)
+  ```
+  Strained `chi_eV` is EXACTLY Si's 4.05eV (delta_Ec=0 by construction);
+  relaxed `chi_eV` is the Vegard-mixed 4.03eV - close by coincidence at
+  this composition, but for a structurally different reason (a real
+  valence-band step vs. a mixed conduction+valence split), exactly as the
+  plan anticipated. `delta_Ei` itself (the actual quantity threaded into
+  the Boltzmann relation/solve) differs by ~7meV between the two cases -
+  small in ABSOLUTE terms at this particular composition, but the
+  MECHANISM generating it is genuinely different, confirming the
+  architecture is picking up a real physics distinction, not coincidentally
+  producing the same number both ways.
+- Closed-form validation (`core.analytic.generation_current_srh`/
+  `generation_current_tat`, unchanged from last session) rerun against the
+  strained config exactly as done for the relaxed case: numeric/closed-form
+  ratios run 0.058->0.62 (TAT) and 0.054->0.58 (SRH) from Va=-0.05V to
+  -5V - nearly identical pattern to the relaxed case's own 0.062->0.67 /
+  0.058->0.62, confirming the architecture is genuinely material-agnostic
+  (same validation machinery, no analytic.py changes, works unmodified).
+- Full reverse(-0.05 to -5V)/forward(0 to 0.6V) sweep on the strained
+  config: forward bias converges cleanly (self-consistency ~1e-4 by
+  0.6V, matching both prior cases). Reverse-bias self-consistency shows
+  the SAME class of open item flagged last session for the relaxed
+  case (not new, not worse) - most reverse points have self-consistency
+  ratios ~1.2-2.8 (comparable to the relaxed case's ~1.1-6), with one
+  point (Va=-2.59V) showing a clear Newton stall (I_tat collapsed to
+  ~1e-13A, self-consistency ~1.4e4) - consistent with the already-
+  documented hard-convergence tail for this doping/material combination,
+  not a new regression from the strain feature itself.
+- **Qualitative leakage comparison across all three cases** (I_tat at
+  matched Va, from each config's own `tat_iv.csv`):
+  ```
+  Va      Si-only(drain_substrate)   relaxed SiGe/Si     strained SiGe/Si
+  -0.94   -6.42e-10                  -4.26e-10           -4.26e-10
+  -1.95   -1.13e-09                  -7.51e-10           -7.52e-10
+  -2.97   -1.55e-09                  -1.03e-09           -1.03e-09
+  -3.98   -1.91e-09                  -1.27e-09           -1.27e-09
+  -5.00   -2.25e-09                  -1.50e-09           -1.50e-09
+  ```
+  **Relaxed and strained SiGe give NEARLY IDENTICAL leakage current**
+  (agreement to 3+ significant figures throughout the sweep) - and this
+  has the SAME explanation flagged last session for why SiGe leakage came
+  out lower than pure Si, not a new finding: with p-SiGe heavily doped
+  (1e20) and n-Si lightly doped (1e17), depletion sits almost entirely on
+  the LIGHT n-Si side in BOTH SiGe configs, so the heavy p-side SiGe
+  region - whichever band-offset model describes it - barely participates
+  in the high-field tunneling-generation region at all. This is a genuine,
+  useful finding worth stating plainly: for THIS doping configuration, the
+  choice between the relaxed and strained SiGe models is essentially
+  UNOBSERVABLE in the leakage I-V, because the region where the model
+  difference would matter (the SiGe depletion layer) is negligibly thin.
+  Demonstrating an actual relaxed-vs-strained leakage DIFFERENCE would
+  need a doping configuration where SiGe is the LIGHTLY doped (depletion-
+  hosting) side - the same follow-up flagged last session for showing the
+  narrow-gap-leakage enhancement in the first place, now doubly motivated.
+
+**Final output paths**:
+- `out/tat/input_diode_sige_pn_strained/tat_iv.csv`,
+  `out/tat/input_diode_sige_pn_strained/tat_iv.png`,
+  `out/tat/input_diode_sige_pn_strained/tat_bands.png`,
+  `out/tat/input_diode_sige_pn_strained/diode_sige_pn_strained_structure.json`
+- (relaxed and Si-only cases' outputs unchanged from last session's run:
+  `out/tat/input_diode_sige_pn/*`, `out/tat/input_diode_drain_substrate/*`)
+
+Not done this session, explicitly deferred (both already flagged last
+session, reinforced by this session's finding above): no doping variant
+with SiGe on the LIGHTLY doped side (needed to actually observe either the
+narrow-gap-leakage enhancement OR a relaxed-vs-strained leakage
+difference); no resolution of the reverse-bias self-consistency open item
+for this doping/material class.

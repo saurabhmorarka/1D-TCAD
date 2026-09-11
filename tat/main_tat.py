@@ -32,8 +32,7 @@ from tat.newton_solver_tat import _node_field
 from core import structure_io as sio
 from core import plot as tplot
 
-OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "out", "tat")
-os.makedirs(OUT, exist_ok=True)
+OUT_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "out", "tat")
 
 C_TAT = "#1f6feb"     # numeric, with TAT+BTBT leakage - blue
 C_NOTAT = "#6c757d"   # numeric, no tunneling - grey
@@ -46,6 +45,20 @@ def main():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "configs", "input_diode_drain_substrate.yaml")
 
+    # Each input config gets its OWN output subdirectory, named from the
+    # config's own basename (e.g. input_diode_drain_substrate.yaml ->
+    # out/tat/input_diode_drain_substrate/) - previously every config wrote
+    # to the same fixed out/tat/tat_iv.{csv,png} regardless of which
+    # config was run, so running a second config (e.g. the new
+    # input_diode_sige_pn.yaml) silently overwrote the first one's plots
+    # in place. Derived from the config filename, not structure_file
+    # (output.structure_file), since structure_file is optional/config-set
+    # and the input config filename is always present and always unique
+    # per run.
+    config_basename = os.path.splitext(os.path.basename(input_path))[0]
+    OUT = os.path.join(OUT_ROOT, config_basename)
+    os.makedirs(OUT, exist_ok=True)
+
     input_cfg = cfg.load_config(input_path)
     mat, dev, Va_list, math_model, save_bias_points, mesh_opts, structure_file = \
         cfg.build_from_config(input_cfg)
@@ -55,21 +68,40 @@ def main():
               "main_tat.py always runs the TAT+BTBT solver.")
 
     g = build_diode_grid(mat, dev, **mesh_opts)
-    x, Cdop = g["x"], g["Cdop"]
+    x, Cdop, mat_field = g["x"], g["Cdop"], g["mat_field"]
     print(f"Grid: {len(x)} points, Wp={g['Wp']*1e4:.2f} um, Wn={g['Wn']*1e4:.2f} um, "
           f"h_min={g['h_min']*1e7:.2f} nm")
     print(f"Doping: Na={dev.Na:.2e} cm^-3 (substrate), Nd={dev.Nd:.2e} cm^-3 (drain)")
 
-    psi_eq, n_eq, p_eq, eq_iters = solve_equilibrium(x, Cdop, mat)
-    Vbi = an.built_in_potential(mat, dev)
-    print(f"Equilibrium: Newton iters={eq_iters}, Vbi={Vbi:.4f} V")
+    # mat_n_closed: the closed-form (core.analytic) companion to mat_field -
+    # None for a homojunction (every closed-form call below then reduces to
+    # its today-exact plain formula), or the real second material for a
+    # heterojunction, so built_in_potential/depletion_widths/
+    # generation_current_srh/generation_current_tat all use the SAME
+    # genuinely-independent two-material closed form the SiGe/Si example
+    # needs, with ONE implementation covering both cases (see
+    # core/analytic.py's own docstrings for the derivation).
+    mat_n_closed = mesh_opts.get("mat_n")
+    if mat_n_closed is not None:
+        print(f"Heterojunction: p-side chi={mat.chi_eV:.3f}eV Eg={mat.Eg_eV:.3f}eV, "
+              f"n-side chi={mat_n_closed.chi_eV:.3f}eV Eg={mat_n_closed.Eg_eV:.3f}eV")
+
+    # mat_field (a core.materials.MaterialField) carries the real per-node/
+    # per-edge material arrays - a homojunction MaterialField.uniform(mat, x)
+    # for every existing config (bit-identical to passing plain `mat`), or
+    # the real heterojunction MaterialField.from_regions(...) when
+    # material.p_side/n_side split the config (see core.mesh.build_diode_grid).
+    psi_eq, n_eq, p_eq, eq_iters = solve_equilibrium(x, Cdop, mat_field)
+    Vbi = an.built_in_potential(mat, dev, mat_n=mat_n_closed)
+    print(f"Equilibrium: Newton iters={eq_iters}, Vbi={Vbi:.4f} V (closed form"
+          f"{', heterojunction' if mat_n_closed is not None else ''})")
 
     print(f"\nRunning TAT+BTBT bias sweep (newton_tat, {len(Va_list)} points)...")
-    _, _, _, res_tat = voltage_sweep(x, Cdop, mat, dev, Va_list, verbose=False,
+    _, _, _, res_tat = voltage_sweep(x, Cdop, mat_field, dev, Va_list, verbose=False,
                                       method="newton_tat")
 
     print("Running comparison bias sweep (newton_qf, no tunneling leakage)...")
-    _, _, _, res_notat = voltage_sweep(x, Cdop, mat, dev, Va_list, verbose=False,
+    _, _, _, res_notat = voltage_sweep(x, Cdop, mat_field, dev, Va_list, verbose=False,
                                         method="newton_qf")
 
     Va_arr = np.array([r["Va"] for r in res_tat])
@@ -86,25 +118,63 @@ def main():
               f"I_no_tat={I_notat[i]:.4e} A  enhancement={enhancement[i]:.3g}x  "
               f"selfconsist={Jres_tat[i]:.2e}")
 
+    # ---- Closed-form (independent, no PDE/mesh) reference curves -
+    # core.analytic.generation_current_srh/generation_current_tat, see
+    # that module for the full derivation. Computed only over reverse bias
+    # (Va<0) - these are depletion-region-generation formulas, not valid
+    # (nor needed) once forward injection dominates. ----
+    rev_mask = Va_arr < 0
+    Va_rev = Va_arr[rev_mask]
+    # Computed over the FULL Va_arr (not just the Va_rev subset) and
+    # indexed identically to I_tat/I_notat/Va_arr throughout - avoids any
+    # sort-order assumption (Va_arr's reverse-bias points run from
+    # reverse_start_V down to reverse_stop_V, i.e. NOT necessarily
+    # ascending - core.config.build_from_config's own np.linspace order).
+    # Forward-bias entries are still computed (the depletion-approximation
+    # formula just floors V at 1e-6, see depletion_widths) but are neither
+    # plotted nor tabled below, since the SRH/TAT depletion-generation
+    # closed form isn't a meaningful (or needed) model once forward
+    # injection dominates.
+    I_srh_closed_full = np.array([an.generation_current_srh(mat, dev, va, mat_n=mat_n_closed) for va in Va_arr])
+    I_tat_closed_full = np.array([
+        an.generation_current_tat(mat, dev, va, t["hurkx_model"], t["kane_model"], mat_n=mat_n_closed)
+        for va in Va_arr])
+    I_srh_closed = I_srh_closed_full[rev_mask]
+    I_tat_closed = I_tat_closed_full[rev_mask]
+
     csv_path = os.path.join(OUT, "tat_iv.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["Va_V", "I_tat_A", "I_no_tat_A", "enhancement", "J_std_over_mean"])
+        w.writerow(["Va_V", "I_tat_A", "I_no_tat_A", "enhancement", "J_std_over_mean",
+                    "I_srh_closed_A", "I_tat_closed_A"])
         for i in range(len(Va_arr)):
-            w.writerow([Va_arr[i], I_tat[i], I_notat[i], enhancement[i], Jres_tat[i]])
+            srh_c = I_srh_closed_full[i] if Va_arr[i] < 0 else ""
+            tat_c = I_tat_closed_full[i] if Va_arr[i] < 0 else ""
+            w.writerow([Va_arr[i], I_tat[i], I_notat[i], enhancement[i], Jres_tat[i], srh_c, tat_c])
     print(f"\nWrote {csv_path}")
 
-    # ---- Validation plot: I(Va) leakage knee, linear + log ----
-    rev_mask = Va_arr < 0
-    Va_rev = Va_arr[rev_mask]
+    print("\nClosed-form (analytic, no PDE) comparison at a few reverse-bias points:")
+    print(f"  {'Va':>7} {'I_numeric(TAT)':>16} {'I_closed(TAT)':>16} {'ratio':>8}   "
+          f"{'I_numeric(noTAT)':>17} {'I_closed(SRH)':>16} {'ratio':>8}")
+    rev_idx = np.where(rev_mask)[0]
+    for j in np.linspace(0, len(rev_idx) - 1, min(8, len(rev_idx))).astype(int):
+        i = rev_idx[j]  # position within the full Va_arr/I_tat/I_notat arrays
+        r_tat = I_tat[i] / I_tat_closed[j] if I_tat_closed[j] != 0 else float("nan")
+        r_srh = I_notat[i] / I_srh_closed[j] if I_srh_closed[j] != 0 else float("nan")
+        print(f"  {Va_arr[i]:+7.2f} {I_tat[i]:16.4e} {I_tat_closed[j]:16.4e} {r_tat:8.3g}   "
+              f"{I_notat[i]:17.4e} {I_srh_closed[j]:16.4e} {r_srh:8.3g}")
 
+    # ---- Validation plot: I(Va) leakage knee, linear + log, with the
+    # closed-form curves overlaid as dotted reference lines ----
     fig, (ax_lin, ax_log) = plt.subplots(2, 1, figsize=(7, 8))
 
     ax_lin.plot(Va_rev, I_tat[rev_mask], "-o", ms=3, color=C_TAT, label="numeric I (TAT+BTBT)")
     ax_lin.plot(Va_rev, I_notat[rev_mask], "--", color=C_NOTAT, label="numeric I (no tunneling)")
+    ax_lin.plot(Va_rev, I_tat_closed, ":", color=C_TAT, label="closed-form I (TAT+BTBT)")
+    ax_lin.plot(Va_rev, I_srh_closed, ":", color=C_NOTAT, label="closed-form I (plain SRH)")
     ax_lin.set_xlabel("Applied bias Va (V) - reverse is negative")
     ax_lin.set_ylabel("I (A), linear")
-    ax_lin.set_title("Drain-substrate leakage: I(Va) - linear scale")
+    ax_lin.set_title(f"{config_basename}: I(Va) - linear scale")
     ax_lin.legend(fontsize=8)
     ax_lin.grid(color="#dddddd")
 
@@ -112,9 +182,13 @@ def main():
                      label="numeric I (TAT+BTBT)")
     ax_log.semilogy(Va_rev, np.abs(I_notat[rev_mask]), "--", color=C_NOTAT,
                      label="numeric I (no tunneling)")
+    ax_log.semilogy(Va_rev, np.abs(I_tat_closed), ":", color=C_TAT,
+                     label="closed-form I (TAT+BTBT)")
+    ax_log.semilogy(Va_rev, np.abs(I_srh_closed), ":", color=C_NOTAT,
+                     label="closed-form I (plain SRH)")
     ax_log.set_xlabel("Applied bias Va (V) - reverse is negative")
     ax_log.set_ylabel("|I| (A), log")
-    ax_log.set_title("Drain-substrate leakage: I(Va) - log scale (softer, earlier-onset knee)")
+    ax_log.set_title(f"{config_basename}: I(Va) - log scale (softer, earlier-onset knee)")
     ax_log.legend(fontsize=8)
     ax_log.grid(color="#dddddd")
 
@@ -175,7 +249,7 @@ def main():
     # even though the bands themselves don't cross.
     deepest_idx = int(np.argmin(Va_arr))
     deepest = res_tat[deepest_idx]
-    xp, xn, _ = an.depletion_widths(mat, dev, deepest["Va"])
+    xp, xn, _ = an.depletion_widths(mat, dev, deepest["Va"], mat_n=mat_n_closed)
     zoom_half_width_um = max(3 * max(xp, xn) * 1e4, 0.05)
     band_xlim = (-zoom_half_width_um, zoom_half_width_um)
 
