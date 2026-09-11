@@ -56,16 +56,24 @@ from core.params import Q, Material
 from core import physics as ph
 from core.solver import contact_values
 
+# Public building blocks shared with other QF-based solvers (currently
+# tat/newton_solver_tat.py) - see ARCHITECTURE.md's "reusable pure-physics
+# kernel" / shared-QF-machinery notes. avalanche/newton_solver_avalanche.py
+# deliberately keeps its own private copies instead of importing these -
+# it is meant to stay standalone, not coupled to this module.
+__all__ = ["poisson_row_scale", "continuity_row_scale", "unpack_qf", "MAX_QF_STEP",
+           "newton_gummel_solve"]
 
-def _poisson_scale(mat: Material, h_typ: float) -> float:
+
+def poisson_row_scale(mat: Material, h_typ: float) -> float:
     return mat.eps * mat.Vt / h_typ ** 2
 
 
-def _continuity_scale(mat: Material, h_typ: float) -> float:
+def continuity_row_scale(mat: Material, h_typ: float) -> float:
     return Q * mat.Dn * mat.ni / h_typ
 
 
-def _unpack(U, N):
+def unpack_qf(U, N):
     """U = [psi, phin, phip]."""
     return U[:N], U[N:2 * N], U[2 * N:3 * N]
 
@@ -92,7 +100,7 @@ def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, con
     trial evaluations, which don't need a new Jacobian until a step is
     accepted."""
     N = len(x)
-    psi, phin, phip = _unpack(U, N)
+    psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
     n = mat.ni * np.exp((psi - phin) / Vt)
     p = mat.ni * np.exp((phip - psi) / Vt)
@@ -125,7 +133,7 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_sc
     3N x 3N sparse Jacobian dF/dU, for unknowns U=[psi, phin, phip]. Fully
     vectorized (no per-node Python loop)."""
     N = len(x)
-    psi, phin, phip = _unpack(U, N)
+    psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
     n = mat.ni * np.exp((psi - phin) / Vt)
     p = mat.ni * np.exp((phip - psi) / Vt)
@@ -251,7 +259,7 @@ def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_sc
 # the comment at its use site for why this is needed (a near-zero carrier
 # density leaves its quasi-Fermi potential almost unconstrained by the
 # residual, letting a raw step send it hundreds of volts off in one shot).
-_MAX_QF_STEP = 5.0
+MAX_QF_STEP = 5.0
 
 
 def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
@@ -272,8 +280,8 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                          psi_bc[-1] + Vt * np.log(p_bcL / mat.ni)])
 
     h_typ = np.min(np.diff(x))
-    poisson_scale = _poisson_scale(mat, h_typ)
-    cont_scale = _continuity_scale(mat, h_typ)
+    poisson_scale = poisson_row_scale(mat, h_typ)
+    cont_scale = continuity_row_scale(mat, h_typ)
     stall_res_threshold = 1.0
 
     def _gummel_start():
@@ -312,7 +320,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
             # reason, well past where a physically sane potential should
             # ever be at room temperature). A few volts is already a very
             # generous cap for this project's bias ranges.
-            delta[N:3 * N] = np.clip(delta[N:3 * N], -_MAX_QF_STEP, _MAX_QF_STEP)
+            delta[N:3 * N] = np.clip(delta[N:3 * N], -MAX_QF_STEP, MAX_QF_STEP)
 
             step = 1.0
             for _ in range(20):
@@ -370,7 +378,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
             f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a Gummel-restart retry - "
             "check this point's self-consistency (J_std/J_mean) before trusting it.")
 
-    psi, phin, phip = _unpack(U, N)
+    psi, phin, phip = unpack_qf(U, N)
     n = mat.ni * np.exp((psi - phin) / Vt)
     p = mat.ni * np.exp((phip - psi) / Vt)
 

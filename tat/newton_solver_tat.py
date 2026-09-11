@@ -48,7 +48,7 @@ from core.params import Q, Material
 from core import physics as ph
 from core.jacobian_scaling import equilibrated_spsolve
 from core.solver import contact_values
-from core.newton_solver_qf import _poisson_scale, _continuity_scale, _unpack, _MAX_QF_STEP
+from core.newton_solver_qf import poisson_row_scale, continuity_row_scale, unpack_qf, MAX_QF_STEP
 from tat.tat import KaneBTBTModel, HurkxTATModel, btbt_generation, hurkx_tat_generation
 
 # Default trap-assisted generation function - swappable per plans/tat_btbt_plan.md's
@@ -138,7 +138,7 @@ def _edge_quantities(psi, phin, phip, n, p, x, mat):
 def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale,
                     kane_model, trap_model, trap_generation_fn=_DEFAULT_TRAP_GENERATION_FN):
     N = len(x)
-    psi, phin, phip = _unpack(U, N)
+    psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
     n = mat.ni * np.exp((psi - phin) / Vt)
     p = mat.ni * np.exp((phip - psi) / Vt)
@@ -170,7 +170,7 @@ def _residual_only(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, con
 def _residual_and_jacobian(U, x, Cdop, mat, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale,
                             kane_model, trap_model, trap_generation_fn=_DEFAULT_TRAP_GENERATION_FN):
     N = len(x)
-    psi, phin, phip = _unpack(U, N)
+    psi, phin, phip = unpack_qf(U, N)
     Vt = mat.Vt
     n = mat.ni * np.exp((psi - phin) / Vt)
     p = mat.ni * np.exp((phip - psi) / Vt)
@@ -318,8 +318,8 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
                          psi_bc[-1] + Vt * np.log(p_bcL / mat.ni)])
 
     h_typ = np.min(np.diff(x))
-    poisson_scale = _poisson_scale(mat, h_typ)
-    cont_scale = _continuity_scale(mat, h_typ)
+    poisson_scale = poisson_row_scale(mat, h_typ)
+    cont_scale = continuity_row_scale(mat, h_typ)
     stall_res_threshold = 1.0
 
     def _gummel_start():
@@ -360,7 +360,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
             # clean, full-step iterations. Applying it unconditionally
             # (not just for Schenk) keeps one solve path for both models.
             delta = equilibrated_spsolve(J, -F)
-            delta[N:3 * N] = np.clip(delta[N:3 * N], -_MAX_QF_STEP, _MAX_QF_STEP)
+            delta[N:3 * N] = np.clip(delta[N:3 * N], -MAX_QF_STEP, MAX_QF_STEP)
 
             step = 1.0
             for _ in range(20):
@@ -401,7 +401,7 @@ def newton_gummel_solve(x, Cdop, mat: Material, Va, psi_eq, n_eq, p_eq,
             f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a Gummel-restart retry - "
             "check this point's self-consistency (J_std/J_mean) before trusting it.")
 
-    psi, phin, phip = _unpack(U, N)
+    psi, phin, phip = unpack_qf(U, N)
     n = mat.ni * np.exp((psi - phin) / Vt)
     p = mat.ni * np.exp((phip - psi) / Vt)
 
