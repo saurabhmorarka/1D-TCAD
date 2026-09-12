@@ -36,6 +36,16 @@ Schema (schema_version=1, dim=1):
                    device with none (e.g. the diode) or when every
                    interface present has Qit_cm2=0.0, so it's not a
                    schema-breaking addition for any existing doc.
+  grid.y_um      : optional (dim=2 only) - per-point y position, parallel to
+                   grid.x_um. Together (x_um[i], y_um[i]) is mesh2d's i-th
+                   point-cloud point; doping_cm3/bias_points fields are
+                   per-point in the same order, exactly as for dim=1.
+  mesh2d         : optional (dim=2 only) - {"triangles": [[i,j,k], ...],
+                   "boundary": [{"point_index", "bc_type"}, ...]}, the
+                   Delaunay connectivity and per-point BC tag
+                   ("contact:<name>" | "symmetry" | "free_surface", see
+                   mesh2d/boundary.py) viz2d needs to render the mesh and
+                   boundary conditions. Omitted for dim=1.
 """
 import json
 
@@ -55,18 +65,26 @@ def _sig_list(arr, ndigits=6):
 
 
 def build_structure(*, device, material, regions, x_um, doping_cm3, bias_points, dim=1,
-                     interfaces=None):
+                     interfaces=None, y_um=None, mesh2d=None):
     """Build the structure+fields doc (pure, no I/O) - see the module
     docstring for the schema. `bias_points` items are {"label", "bias",
     "fields": {...}} with an optional "regime" key, and `regions` items are
-    {"name", "x_range_um", "kind", "doping_type"}. Callers that always want
-    the doc for plotting, whether or not it also gets written to disk
-    (e.g. because the *_structure.json is disabled via input_*.yaml's
-    output.structure_file), should call this directly and pass the result
-    to write_structure() themselves when they do want it saved."""
+    {"name", "x_range_um", "kind", "doping_type"} for dim=1, or additionally
+    carry "y_range_um" for dim=2 (passed straight through, unvalidated).
+    `y_um` and `mesh2d` are dim=2-only additions (see the module docstring);
+    both are omitted from the doc when None, so every existing dim=1 caller
+    is unaffected. Callers that always want the doc for plotting, whether or
+    not it also gets written to disk (e.g. because the *_structure.json is
+    disabled via input_*.yaml's output.structure_file), should call this
+    directly and pass the result to write_structure() themselves when they
+    do want it saved."""
     material_out = {}
     for k, v in material.items():
         material_out[k] = _sig_list(v, 8) if np.ndim(v) > 0 else _sig(v, 8)
+
+    grid = {"x_um": _sig_list(x_um)}
+    if y_um is not None:
+        grid["y_um"] = _sig_list(y_um)
 
     doc = {
         "schema_version": SCHEMA_VERSION,
@@ -74,7 +92,7 @@ def build_structure(*, device, material, regions, x_um, doping_cm3, bias_points,
         "device": device,
         "material": material_out,
         "regions": regions,
-        "grid": {"x_um": _sig_list(x_um)},
+        "grid": grid,
         "doping_cm3": _sig_list(doping_cm3),
         "bias_points": [
             {
@@ -92,6 +110,8 @@ def build_structure(*, device, material, regions, x_um, doping_cm3, bias_points,
             {"x_um": _sig(iface["x_um"]), "Qit_cm2": _sig(iface["Qit_cm2"], 8)}
             for iface in nonzero_interfaces
         ]
+    if mesh2d is not None:
+        doc["mesh2d"] = mesh2d
     return doc
 
 
