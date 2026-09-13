@@ -43,16 +43,42 @@ def _dist_to_segments(p, segments):
 def _target_spacing(dist, h_min, h_max, growth):
     if not np.isfinite(dist):
         return h_max
-    return float(np.clip(h_min * growth ** (dist / h_min), h_min, h_max))
+    # Cap the exponent before evaluating growth**exponent, not after: for a
+    # very small h_min relative to the domain size (e.g. a MOS capacitor's
+    # nanometer-thin oxide graded against a micron-scale domain), dist/h_min
+    # can run into the thousands, and growth**that raises a plain Python
+    # OverflowError (unlike numpy, which would just return inf) well before
+    # np.clip ever gets a chance to bring it back down to h_max.
+    exponent = dist / h_min
+    max_exponent = np.log(h_max / h_min) / np.log(growth)
+    if exponent >= max_exponent:
+        return h_max
+    return float(np.clip(h_min * growth ** exponent, h_min, h_max))
 
 
 def _domain_pslg(domain):
-    """Vertices + segments for the domain's outer rectangle and every
-    region's rectangle boundary - a Planar Straight Line Graph `triangle`
-    triangulates conformingly (segments are never crossed)."""
-    verts = [(0.0, 0.0), (domain.width_cm, 0.0),
-             (domain.width_cm, domain.height_cm), (0.0, domain.height_cm)]
-    segs = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    """Vertices + segments for the domain's outer boundary (a plain
+    rectangle, or a rectangle with a mesa protrusion spliced into its top
+    edge - see geometry2d.py::Domain2D.outer_boundary) plus every interior
+    region's own boundary - a Planar Straight Line Graph `triangle`
+    triangulates conformingly (segments are never crossed).
+
+    A region with y_range_cm[0] < 0 (a mesa's material fill, e.g. an
+    oxide) is handled specially: its top/left/right sides already coincide
+    with the outer polygon's mesa notch (added once, above, not
+    duplicated here) - only its bottom edge (the oxide/semiconductor
+    interface, interior to the domain once the mesa protrudes above it) is
+    a genuinely new interior segment, and it reuses the notch's own corner
+    vertices instead of creating duplicate ones at the same point."""
+    outer_verts, outer_edges, _ = domain.outer_boundary()
+    verts = [tuple(v) for v in outer_verts]
+    segs = [tuple(e) for e in outer_edges]
+
+    def find_vertex(pt, tol=1e-9):
+        for k, v in enumerate(verts):
+            if abs(v[0] - pt[0]) <= tol and abs(v[1] - pt[1]) <= tol:
+                return k
+        return None
 
     def add_rect(x0, y0, x1, y1):
         base = len(verts)
@@ -63,7 +89,18 @@ def _domain_pslg(domain):
     for region in domain.regions[1:]:
         x0, x1 = region.x_range_cm
         y0, y1 = region.y_range_cm
-        add_rect(x0, y0, x1, y1)
+        if y0 < 0.0:
+            # Mesa material region: only the interface (bottom, y=0) edge is new;
+            # its endpoints already exist as outer-polygon vertices.
+            i0 = find_vertex((x0, y1))
+            i1 = find_vertex((x1, y1))
+            if i0 is None or i1 is None:
+                raise ValueError(
+                    f"mesh2d: mesa region {region.name!r} ({x0},{y0})-({x1},{y1}) "
+                    "doesn't align with any domain.top_mesas entry's footprint")
+            segs.append((i0, i1))
+        else:
+            add_rect(x0, y0, x1, y1)
 
     return np.array(verts, dtype=float), np.array(segs, dtype=int)
 

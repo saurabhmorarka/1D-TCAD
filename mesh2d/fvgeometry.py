@@ -49,6 +49,14 @@ class FVGeometry:
                                     # second, independent mesh-quality diagnostic (a point
                                     # can have zero negative sub-areas of its own and still
                                     # end up with a pathologically small total area)
+    edge_g: np.ndarray = None      # (E,) float, only set when eps_tri is given to
+                                     # build_fv_geometry - the per-edge conductance
+                                     # eps*edge_weight ALREADY split and weighted by each
+                                     # adjacent triangle's own permittivity (see
+                                     # build_fv_geometry's docstring), for a heterogeneous-
+                                     # permittivity mesh (e.g. a MOS capacitor's oxide/
+                                     # semiconductor interface) - a homogeneous mesh (the
+                                     # diode) can keep using mat.eps * edge_weight instead.
 
 
 def _signed_area2(a, b, c):
@@ -71,7 +79,7 @@ def _circumcenter(a, b, c):
     return np.array([ux, uy])
 
 
-def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None):
+def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None, eps_tri=None):
     """triangles, if given (from mesh2d/pointcloud.py's `triangle`-library
     constrained conforming-Delaunay refinement), are used directly instead
     of recomputing a plain scipy.spatial.Delaunay triangulation - the
@@ -89,7 +97,23 @@ def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None):
     divergence term into an O(1e13) residual). Per the project's mesh-
     robustness principle, this is a physically-motivated regularization
     (bounding how thin a control volume's flux/charge normalization can get)
-    rather than a mesh-refinement patch, and is preferred over one."""
+    rather than a mesh-refinement patch, and is preferred over one.
+
+    eps_tri: optional (M,) array, one relative-permittivity-times-eps0
+    value per triangle. When given, each internal edge's Voronoi facet
+    (the segment C1-C2 between its two adjacent triangles' circumcenters)
+    is split at its own midpoint M - which lies on the same perpendicular
+    bisector of the edge as C1 and C2, since all three are, by definition,
+    equidistant from the edge's endpoints, so M sits between them for a
+    well-shaped mesh - into a d1=|M-C1| piece belonging to triangle 1 and a
+    d2=|M-C2| piece belonging to triangle 2. The resulting conductance
+    eps_tri1*d1/edge_len + eps_tri2*d2/edge_len is the exact box-FV
+    generalization of a uniform eps*facet_len/edge_len to a piecewise-
+    constant permittivity field (this is how a MOS capacitor's oxide/
+    semiconductor interface gets correct D-field continuity in this mesh -
+    see solver2d/poisson2d_mos.py). Returned as FVGeometry.edge_g, already
+    eps-weighted (unlike the plain geometric edge_weight, which a
+    homogeneous-material solver like the diode's still uses directly)."""
     points = np.asarray(points_cm, dtype=float)
     if triangles is not None:
         simplices = np.asarray(triangles, dtype=int)
@@ -115,7 +139,7 @@ def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None):
             key = (a, b) if a < b else (b, a)
             edge_tris.setdefault(key, []).append(t)
 
-    edges, edge_weight, facet_length = [], [], []
+    edges, edge_weight, facet_length, edge_g = [], [], [], []
     boundary_edges = set()
     for (i, j), tris in edge_tris.items():
         if len(tris) == 2:
@@ -125,6 +149,11 @@ def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None):
             edges.append((i, j))
             edge_weight.append(facet_len / edge_len)
             facet_length.append(facet_len)
+            if eps_tri is not None:
+                mid = 0.5 * (points[i] + points[j])
+                d1 = np.linalg.norm(mid - c1)
+                d2 = np.linalg.norm(mid - c2)
+                edge_g.append(eps_tri[tris[0]] * d1 / edge_len + eps_tri[tris[1]] * d2 / edge_len)
         else:
             boundary_edges.add((i, j))
 
@@ -165,4 +194,5 @@ def build_fv_geometry(points_cm, triangles=None, cv_area_floor=None):
         boundary_edges=boundary_edges,
         n_negative_subareas=n_negative,
         n_floored=n_floored,
+        edge_g=np.array(edge_g, dtype=float) if eps_tri is not None else None,
     )

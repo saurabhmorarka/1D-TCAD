@@ -3045,3 +3045,156 @@ default changed from `"all"` to a 5-point list
 (`[-1.0, -0.5, 0.0, 0.5, 1.0]`), dropping the structure JSON from ~412KB
 (21 full field sets) to a much smaller 5-point file with no loss of the
 terminal I-V data driving the comparison plot.
+
+## 26. Session 16: first 2D MOS capacitor - a non-rectangular mesa domain,
+heterogeneous-permittivity box-FV geometry, and a validated 2D low-
+frequency C-V sweep matching the 1D reference
+
+**Goal**: extend the 2D infrastructure (mesh2d/solver2d/viz2d) to a MOS
+capacitor - same oxide + ideal metal gate physics as the 1D MOS capacitor
+(`mos/`), patterned the same way the diode's p+ square was (a gate/oxide
+stack centered over the same 6um-wide footprint), sitting on top of a
+light p substrate block, with correct mesh resolution at the oxide/silicon
+interface, and a 2D C-V curve matching the 1D reference.
+
+**Geometry generalization - a mesa protrusion, not a dug-in region**: the
+user explicitly chose the more physically realistic option when asked -
+the oxide protrudes ABOVE the flat substrate top surface (like a real
+gate stack), rather than a simpler "full-width oxide blanket with a
+patterned gate contact" alternative that would have kept the domain a
+plain rectangle. This required genuinely generalizing `mesh2d/geometry2d.py`
+beyond a rectangle domain for the first time:
+- `Region` gained `kind="insulator"` (already anticipated, unused until
+  now) and an `eps_r` override field.
+- New `TopMesa` dataclass: a protrusion's footprint (x-range + height),
+  purely for outer-boundary-shape/BC-tagging purposes - the mesa's actual
+  material fill is a separate `Region` with `y_range_cm[0] < 0` (the
+  domain's signal that a region protrudes above the flat top rather than
+  being dug into it).
+- `Domain2D.outer_boundary()` builds the stepped polygon (base rectangle's
+  top edge with a notch spliced in per mesa); `Domain2D.contains()` and
+  `Domain2D.boundary_point_role()` replace the old rectangle-only
+  membership tests with general ones (the latter classifies a boundary
+  point as left/right/bottom/top/mesa_wall); `outward_normal()` in
+  `mesh2d/boundary.py` was rewritten from a centroid heuristic (only valid
+  for a convex rectangle) to a `domain.contains()` probe-point test, which
+  is correct for any shape.
+- `mesh2d/pointcloud.py::_domain_pslg` now builds this polygon instead of
+  a hardcoded rectangle; a mesa's own material region only contributes ONE
+  new interior segment (its oxide/silicon interface) since its other three
+  sides already coincide with the outer polygon's notch - reusing those
+  vertices instead of duplicating them.
+- A very pleasant side effect of this design: `Domain2D.junction_segments()`
+  needed NO changes at all to start including the oxide/silicon interface
+  as a mesh-refinement target - it already excludes segments lying on the
+  domain's own outer boundary, and once the interface become genuinely
+  interior (below the protruding mesa) rather than being on the boundary,
+  it started passing that existing test automatically.
+
+**Heterogeneous-permittivity box-FV**: `mesh2d/fvgeometry.py::build_fv_geometry`
+gained an optional `eps_tri` (per-triangle permittivity) parameter. Each
+internal edge's Voronoi facet (the segment C1-C2 between its two adjacent
+triangles' circumcenters) is split at its own midpoint M - which lies on
+the same perpendicular bisector as C1 and C2, since all three are by
+definition equidistant from the edge's endpoints - into a d1=\|M-C1\| piece
+belonging to triangle 1 and a d2=\|M-C2\| piece belonging to triangle 2,
+giving an edge conductance eps_tri1*d1/edge_len + eps_tri2*d2/edge_len -
+the exact box-FV generalization of a uniform eps*facet_len/edge_len to a
+piecewise-constant permittivity field, needed for correct D-field
+continuity at the oxide/semiconductor interface. `mesh2d/mesh2d.py::build_mesh2d`
+gained an optional `mat` parameter that turns this on (computing per-
+triangle eps from `domain.material_props_at` at each triangle's centroid)
+and also populates `Mesh2D.ni_arr`/`is_insulator` (0/True at an insulator
+point) - omitting `mat` (the diode's own call site) reproduces the
+existing homogeneous-silicon behavior byte-for-bit.
+
+**New solver - much simpler than the diode's**: `solver2d/poisson2d_mos.py`
+solves ONLY for psi (no phin/phip unknowns, no continuity equations at
+all) - exactly mirroring `mos/mos_solver.py`'s own reasoning that a MOS
+capacitor carries zero steady-state current, so the whole structure is a
+sequence of independent nonlinear-Poisson equilibrium solves, one per gate
+voltage, with phin/phip prescribed (not solved) rather than unknowns. Reuses
+`mos.mos_analytic.flatband_voltage` directly (already dimension-agnostic)
+for the ideal-metal gate's Dirichlet BC. `solver2d/mos_charge2d.py::gate_charge`
+extracts the induced gate charge via the same "Dirichlet-node reaction
+flux" trick `solver2d/current.py::contact_current` already uses for
+terminal current, applied to eps*dpsi/dn instead of an electron/hole
+current - since n=p=Cdop=0 identically at every oxide node, the sum over a
+gate node's incident edges of `edge_g*(psi_neighbor-psi_gate)` IS exactly
+its own induced free charge, with no extra bookkeeping needed. `cv_sweep_2d`
+sweeps VG with warm-starting (mirroring the diode's own bias-sweep
+continuation) and differentiates Qs(VG) numerically for C_lf, matching
+`mos/mos_solver.py::cv_sweep`'s own low-frequency half exactly (high-
+frequency is out of scope for this pass, per an explicit user choice).
+
+**Two real bugs found before the first correct C-V result**:
+1. `psi_bc` was accidentally passed to the residual/Jacobian assembly as
+   BOTH a full-size (N) array in one call path and a contact-only-sized
+   restricted array in another, so `Rpsi[is_contact] = psi[is_contact] -
+   psi_bc` raised a broadcast `ValueError` the first time a bias point
+   after VG=0 tried to warm-start. Fixed by always passing the full-size
+   array through the residual/Jacobian functions and indexing it with
+   `is_contact` internally, rather than pre-indexing at the call site.
+2. The oxide was originally meshed as a SINGLE degenerate triangle layer
+   top-to-bottom (confirmed directly: only 2 distinct y-values existed
+   anywhere inside the 10nm oxide region) - because mesh grading was only
+   pulling tight from ONE side of the thin gap (the oxide/silicon
+   interface, `domain.junction_segments()`'s default target); the
+   distance-based target spacing relaxes almost immediately across a gap
+   this thin, and `triangle`'s max-area refinement constraint alone
+   doesn't force extra layers in a particular direction - it happily
+   satisfies area with one long, thin, near-degenerate triangle instead.
+   This silently produced a garbage (~30% too low) accumulation/inversion
+   capacitance plateau that still LOOKED like a plausible C-V curve at a
+   glance - the kind of bug that would have shipped unnoticed without
+   comparing the plateau's absolute value against the 1D reference. Fixed
+   by passing BOTH the oxide/silicon interface AND the mesa's own top
+   surface as `interface_segments` to `build_mesh2d`, pulling the grading
+   tight from both sides of the gap and forcing genuine multi-layer
+   vertical resolution (1603 points -> 8051 points for this config).
+   Uncovered a latent, unrelated bug in the process: `_target_spacing`'s
+   `growth ** (dist / h_min)` raises a plain Python `OverflowError` (not
+   numpy's silent `inf`) for a large exponent, which a very small `h_min`
+   relative to the domain size (nanometers vs microns here) reaches easily
+   - fixed by capping the exponent before evaluating the power, not after.
+
+**Result**: the 2D low-frequency C-V curve matches the 1D reference
+closely after the fixes above - same threshold-voltage location, same
+depletion minimum, accumulation/inversion plateaus within ~5-6% of the 1D
+value (a reasonable numerical-resolution gap, not a qualitative
+mismatch). 31/31 swept points converged. The 2D mesh (8051 points, needed
+for correct oxide resolution) runs ~300-350x slower per point than the 1D
+solve (122 nodes) - expected given how much finer the oxide-region
+resolution has to be relative to the substrate's own bulk mesh.
+
+**Viewer follow-up**: the user noticed the oxide "wasn't visible" in the
+interactive viewer - it genuinely was in the data (grid points at y<0
+existed) but was invisible at the structure's true aspect ratio, since the
+oxide is 1000x thinner than the substrate is deep. Added a dedicated
+"gate stack" inset panel (`viz2d/plot2d.py::mesa_bbox_um` +
+`interactive_field_viewer`'s new `ax_inset`) that crops tightly to the
+mesa region and deliberately uses `aspect="auto"` instead of `"equal"` -
+letting the y-axis stretch to fill a roughly square panel is what actually
+makes a nanometer-thin layer visible at all, the same "vertically
+exaggerated, not to scale" convention real device cross-section diagrams
+use for a thin gate stack.
+
+**Electric field as a saved/viewable quantity**: user asked for Ex/Ey to
+be available as fields, for any 2D device, not just the MOS capacitor.
+Added `solver2d/efield2d.py::electric_field_2d` - standard P1 finite-
+element vertex-gradient recovery (each triangle's own vertex values of psi
+determine ONE constant gradient, via a plain 2x2 linear solve from two
+edge vectors; each point's field is the area-weighted average of every
+incident triangle's gradient), independent of the box-FV edge/circumcenter
+machinery the solver itself uses to solve for psi. Wired into both
+`main2d_sweep.py` (diode) and `main2d_mos_sweep.py` (MOS) at the same
+point full fields are already being saved for a bias point, and exposed as
+two new selectable fields (`Ex`, `Ey`, V/cm, diverging colormap like psi)
+in `viz2d/plot2d.py::FIELD_SPECS`. Verified on the MOS structure: Ey peaks
+around -1.1 MV/cm right at the oxide/silicon interface at VG=-1V
+(accumulation) - physically the right sign and right location.
+
+**Not done this session**: high-frequency (frozen-minority-carrier) 2D
+C-V; a YAML config surface for `interface_segments` in the diode driver
+(still open from earlier); PETSc/iterative-solver adoption (still
+deliberately deferred).

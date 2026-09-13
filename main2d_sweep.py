@@ -27,6 +27,7 @@ from core.solver import voltage_sweep as voltage_sweep_1d
 from mesh2d import config2d
 from mesh2d.mesh2d import build_mesh2d
 from solver2d.current import contact_current_density
+from solver2d.efield2d import electric_field_2d
 from solver2d.newton_solver_qf_2d import newton_solve_2d
 from viz2d.plot2d import plot_field2d
 
@@ -212,14 +213,15 @@ def main():
     ]
     material_dict = dict(eps_r=mat.eps_r, ni=mat.ni, mu_n=mat.mu_n, mu_p=mat.mu_p,
                           tau_n=mat.tau_n, tau_p=mat.tau_p, chi_eV=mat.chi_eV, Eg_eV=mat.Eg_eV)
-    bias_points = [
-        {
-            "label": f"Va={Va_sorted[idx]:+.3f}V",
-            "bias": float(Va_sorted[idx]),
-            "fields": {k: results_2d[Va_sorted[idx]][k] for k in ("psi", "n", "p", "phin", "phip")},
-        }
-        for idx in save_idx
-    ]
+    bias_points = []
+    for idx in save_idx:
+        Va = Va_sorted[idx]
+        r = results_2d[Va]
+        Ex, Ey = electric_field_2d(mesh.points, mesh.triangles, r["psi"])
+        fields = {k: r[k] for k in ("psi", "n", "p", "phin", "phip")}
+        fields["Ex"] = Ex
+        fields["Ey"] = Ey
+        bias_points.append({"label": f"Va={Va:+.3f}V", "bias": float(Va), "fields": fields})
     doc = sio.build_structure(
         device="diode2d", material=material_dict, regions=regions,
         x_um=points_um[:, 0], y_um=points_um[:, 1], doping_cm3=mesh.Cdop,

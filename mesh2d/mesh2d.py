@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from core.params import EPS0
 from mesh2d.boundary import tag_boundary_points
 from mesh2d.fvgeometry import build_fv_geometry
 from mesh2d.mesh_quality import check_mesh_quality
@@ -40,9 +41,20 @@ class Mesh2D:
                                      # length; solvers should use this, not a raw
                                      # np.min(edge_lengths), as their normalization
                                      # length scale (see newton_solver_qf_2d.py)
+    edge_g: np.ndarray = None      # (E,) float, only set when `mat` is passed to
+                                     # build_mesh2d - per-edge, already eps-weighted
+                                     # conductance (see fvgeometry.py::build_fv_geometry),
+                                     # correct across a heterogeneous-permittivity
+                                     # interface (e.g. a MOS capacitor's oxide/
+                                     # semiconductor boundary), unlike a homogeneous
+                                     # mat.eps * edge_weight.
+    ni_arr: np.ndarray = None      # (N,) cm^-3, only set when `mat` is passed - intrinsic
+                                     # concentration per point, 0 at an insulator point
+                                     # (no mobile carriers there at all).
+    is_insulator: np.ndarray = None  # (N,) bool, only set when `mat` is passed.
 
 
-def _drop_isolated_points(points, triangles, cv_area_floor, max_passes=3):
+def _drop_isolated_points(points, triangles, cv_area_floor, eps_tri=None, max_passes=3):
     """A rectangle corner's triangle can occasionally end up with its only
     non-boundary edge not shared by any neighboring triangle - a point with
     ZERO internal edges gets no Poisson/continuity coupling to the rest of
@@ -51,9 +63,12 @@ def _drop_isolated_points(points, triangles, cv_area_floor, max_passes=3):
     MatrixRankWarning: Matrix is exactly singular with such a point
     present). These points carry no physically meaningful area anyway, so
     the fix is to drop them and rebuild the FV geometry from the remaining
-    triangles (iterating in case that ever isolates another point)."""
+    triangles (iterating in case that ever isolates another point).
+
+    eps_tri, if given, is dropped/reindexed in lockstep with `triangles` so
+    a later fv rebuild's per-triangle permittivity array stays aligned."""
     for _ in range(max_passes):
-        fv = build_fv_geometry(points, triangles=triangles, cv_area_floor=cv_area_floor)
+        fv = build_fv_geometry(points, triangles=triangles, cv_area_floor=cv_area_floor, eps_tri=eps_tri)
         deg = np.zeros(len(points), dtype=int)
         np.add.at(deg, fv.edges[:, 0], 1)
         np.add.at(deg, fv.edges[:, 1], 1)
@@ -65,6 +80,8 @@ def _drop_isolated_points(points, triangles, cv_area_floor, max_passes=3):
         points = points[keep]
         tri_keep = ~np.any(isolated[triangles], axis=1)
         triangles = new_index[triangles[tri_keep]]
+        if eps_tri is not None:
+            eps_tri = eps_tri[tri_keep]
     raise RuntimeError(
         f"mesh2d: {np.sum(isolated)} isolated point(s) remained after {max_passes} "
         "drop-and-rebuild passes - a persistent degeneracy, not a one-off corner quirk; "
@@ -72,7 +89,7 @@ def _drop_isolated_points(points, triangles, cv_area_floor, max_passes=3):
 
 
 def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.1,
-                  min_angle_deg=32, interface_segments=None):
+                  min_angle_deg=32, interface_segments=None, mat=None):
     """Build a Mesh2D for any Domain2D (blocky regions/contacts) - the
     single entry point every 2D device driver should go through, so the
     mandatory quality gate (mesh2d/mesh_quality.py) and FV-robustness
@@ -85,16 +102,39 @@ def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.
     near/relaxed-away mesh grading independent of doping-junction geometry.
 
     cv_area_floor_factor sets the box-method control-volume area floor
-    (mesh2d/fvgeometry.py::build_fv_geometry) as a fraction of h_min_cm^2."""
+    (mesh2d/fvgeometry.py::build_fv_geometry) as a fraction of h_min_cm^2.
+
+    `mat`, if given (a core.params.Material), turns on the heterogeneous-
+    permittivity machinery needed once a domain has an "insulator" region
+    (e.g. a MOS capacitor's oxide): per-triangle eps is looked up from
+    domain.material_props_at at each triangle's centroid, producing
+    Mesh2D.edge_g (eps-weighted conductance, see fvgeometry.py) and
+    Mesh2D.ni_arr/is_insulator (0/True at an insulator point). Omitting it
+    (the default) reproduces today's homogeneous-silicon diode mesh
+    byte-for-bit - solvers for a single-material device keep using
+    mat.eps * mesh.edge_weight directly, unaffected by this parameter."""
     points, triangles = build_point_cloud(
         domain, h_min_cm, h_max_cm, growth=growth, min_angle_deg=min_angle_deg,
         interface_segments=interface_segments)
 
     quality_report = check_mesh_quality(points, triangles)
 
-    fv = _drop_isolated_points(points, triangles, cv_area_floor=cv_area_floor_factor * h_min_cm ** 2)
+    eps_tri = None
+    if mat is not None:
+        centroids = points[triangles].mean(axis=1)
+        _, eps_r_tri = domain.material_props_at(centroids[:, 0], centroids[:, 1], mat)
+        eps_tri = eps_r_tri * EPS0
+
+    fv = _drop_isolated_points(points, triangles, cv_area_floor=cv_area_floor_factor * h_min_cm ** 2,
+                                eps_tri=eps_tri)
     Cdop = domain.doping_at(fv.points[:, 0], fv.points[:, 1])
     tags = tag_boundary_points(fv.points, domain)
+
+    ni_arr = is_insulator = None
+    if mat is not None:
+        is_insulator, _ = domain.material_props_at(fv.points[:, 0], fv.points[:, 1], mat)
+        ni_arr = np.where(is_insulator, 0.0, mat.ni)
+
     return Mesh2D(
         domain=domain,
         points=fv.points,
@@ -111,6 +151,9 @@ def build_mesh2d(domain, h_min_cm, h_max_cm, growth=1.3, cv_area_floor_factor=0.
         boundary_point_index=tags.point_index,
         boundary_bc_type=tags.bc_type,
         h_min_cm=h_min_cm,
+        edge_g=fv.edge_g,
+        ni_arr=ni_arr,
+        is_insulator=is_insulator,
     )
 
 

@@ -41,7 +41,28 @@ def _contact_color(name, contact_names):
     return CONTACT_COLORS[contact_names.index(name) % len(CONTACT_COLORS)]
 
 
-def plot_structure2d(doc, ax=None, show_mesh=True, show_boundary=True, label_regions=True):
+def mesa_bbox_um(doc, margin_x_frac=0.15, margin_y_mult=3.0):
+    """Bounding box (x0, x1, y0, y1), in um, of a mesa protrusion (a region
+    with y_range_um[0] < 0, e.g. a MOS capacitor's oxide+gate stack) padded
+    by a margin - or None if this structure has no mesa. Used to give the
+    interactive viewer a dedicated zoomed inset, since a real oxide is
+    routinely 100-1000x thinner than the substrate it sits on and is
+    otherwise completely invisible at the structure's own true-scale plot
+    (see mesh2d/geometry2d.py::TopMesa's module docstring)."""
+    mesa_regions = [r for r in doc["regions"] if r["y_range_um"][0] < 0]
+    if not mesa_regions:
+        return None
+    x0 = min(r["x_range_um"][0] for r in mesa_regions)
+    x1 = max(r["x_range_um"][1] for r in mesa_regions)
+    y0 = min(r["y_range_um"][0] for r in mesa_regions)
+    width = x1 - x0
+    height = -y0
+    return (x0 - margin_x_frac * width, x1 + margin_x_frac * width,
+            y0 - margin_y_mult * height, margin_y_mult * height)
+
+
+def plot_structure2d(doc, ax=None, show_mesh=True, show_boundary=True, label_regions=True,
+                      xlim=None, ylim=None, aspect="equal"):
     """Device cross-section + point-cloud mesh + boundary-condition tags.
     Returns (ax, layers) where `layers` maps a layer name ("regions", "mesh",
     "boundary") to the list of matplotlib artists in it, for toggling."""
@@ -104,11 +125,17 @@ def plot_structure2d(doc, ax=None, show_mesh=True, show_boundary=True, label_reg
                                    markersize=6, label=label))
         ax.legend(handles=handles, fontsize=7, loc="upper right")
 
-    ax.set_xlim(0, max(x_um))
-    ax.set_ylim(max(y_um), 0)  # y=0 is the top surface - keep it at the top of the plot
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    else:
+        ax.set_xlim(0, max(x_um))
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    else:
+        ax.set_ylim(max(y_um), 0)  # y=0 is the top surface - keep it at the top of the plot
     ax.set_xlabel("x (um)")
     ax.set_ylabel("y (um), depth from top surface")
-    ax.set_aspect("equal")
+    ax.set_aspect(aspect)
     ax.set_title(f"{doc['device']} 2D structure")
     if own_fig:
         fig.tight_layout()
@@ -171,6 +198,8 @@ FIELD_SPECS = {
     "p": dict(cmap="magma", log_scale=True, label="p (cm^-3)"),
     "phin": dict(cmap="RdBu_r", log_scale=False, label="phin (V)"),
     "phip": dict(cmap="RdBu_r", log_scale=False, label="phip (V)"),
+    "Ex": dict(cmap="RdBu_r", log_scale=False, label="Ex (V/cm)"),
+    "Ey": dict(cmap="RdBu_r", log_scale=False, label="Ey (V/cm)"),
 }
 
 
@@ -182,7 +211,7 @@ def interactive_field_viewer(doc):
     and see that field's profile along it in the side panel. Requires a
     real (non-Agg) backend, i.e. running with --interactive on the CLI
     below."""
-    from matplotlib.widgets import CheckButtons, RadioButtons, Slider
+    from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider
     from scipy.interpolate import griddata
 
     _require_2d(doc, "interactive_field_viewer")
@@ -198,19 +227,39 @@ def interactive_field_viewer(doc):
     # every fig.colorbar(tpc, ax=ax_main) call had been quietly shrinking
     # ax_main to make room for a new colorbar, even after removing the old
     # one). A dedicated, fixed-rect colorbar axes fixes that permanently.
-    # Controls live in a compact column top-right (not a full-width strip
-    # at the bottom), and the slice/cut plot sits below them.
+    # Controls live in a compact column top-right; the field picker is a
+    # single always-visible button that pops a floating option list open
+    # ON TOP of whatever else is below it (a real dropdown, not a
+    # permanently-expanded RadioButtons box) - the previous always-open
+    # list ate enough fixed vertical space that it routinely collided with
+    # the bias slider/layer checkboxes/gate-stack inset/slice panel below
+    # it, especially once Ex/Ey brought the field count to 8.
+    mesa_bbox = mesa_bbox_um(doc)
+
     fig = plt.figure(figsize=(15, 7))
     ax_main = fig.add_axes([0.06, 0.08, 0.52, 0.88])
     ax_cbar = fig.add_axes([0.60, 0.08, 0.015, 0.88])
-    ax_cut = fig.add_axes([0.74, 0.08, 0.24, 0.32])
+
+    col_x, col_w = 0.74, 0.24
+    field_btn_ax = fig.add_axes([col_x, 0.91, col_w, 0.05])
+    slider_ax = fig.add_axes([col_x + 0.02, 0.855, col_w - 0.04, 0.025])
+    check_ax = fig.add_axes([col_x, 0.74, col_w, 0.09])
+
+    if mesa_bbox is not None:
+        ax_inset = fig.add_axes([col_x, 0.40, col_w, 0.28])
+        ax_cut = fig.add_axes([col_x, 0.08, col_w, 0.28])
+    else:
+        ax_inset = None
+        ax_cut = fig.add_axes([col_x, 0.08, col_w, 0.60])
 
     field_options = ["structure"] + field_names
     n_fields = len(field_options)
-    radio_height = min(0.34, 0.05 * n_fields)
-    radio_ax = fig.add_axes([0.74, 0.96 - radio_height, 0.24, radio_height])
-    slider_ax = fig.add_axes([0.76, 0.55, 0.20, 0.025])
-    check_ax = fig.add_axes([0.74, 0.44, 0.24, 0.08])
+    menu_height = min(0.30, 0.045 * n_fields)
+    menu_ax = fig.add_axes([col_x, 0.91 - menu_height, col_w, menu_height])
+    menu_ax.set_zorder(10)  # draws on top of check_ax/ax_inset/ax_cut while open
+    menu_ax.patch.set_edgecolor("black")
+    menu_ax.patch.set_linewidth(1.0)
+    menu_ax.set_visible(False)
 
     state = {"field": "structure", "bias_idx": len(bias_points) // 2 if bias_points else 0,
              "cut_pts": [], "show_mesh": True, "show_boundary": True}
@@ -221,33 +270,46 @@ def interactive_field_viewer(doc):
         vals = bias_points[state["bias_idx"]]["fields"][state["field"]]
         return np.array([v if v is not None else np.nan for v in vals], dtype=float)
 
+    def _draw_into(ax, xlim=None, ylim=None, aspect="equal"):
+        """Renders the current field/structure state into `ax` - shared by
+        the main view and the mesa zoomed inset so the two never drift out
+        of sync with each other."""
+        values = field_values()
+        if values is not None:
+            spec = FIELD_SPECS[state["field"]]
+            plot_values = np.log10(np.maximum(values, 1e-300)) if spec["log_scale"] else values
+            tpc = ax.tripcolor(x_um, y_um, triangles, plot_values, shading="gouraud",
+                                cmap=spec["cmap"])
+            if state["show_mesh"]:
+                plot_structure2d(doc, ax=ax, show_mesh=True, show_boundary=False, label_regions=False)
+            Va = bias_points[state["bias_idx"]]["bias"]
+            ax.set_title(f"{state['field']} @ Va={Va:+.3f}V", fontsize=9)
+        else:
+            tpc = None
+            plot_structure2d(doc, ax=ax, show_mesh=state["show_mesh"],
+                              show_boundary=state["show_boundary"], label_regions=(ax is ax_main))
+        ax.set_xlabel("x (um)", fontsize=8)
+        ax.set_ylabel("y (um)", fontsize=8)
+        ax.set_aspect(aspect)
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        return tpc
+
     def redraw_main():
         xlim, ylim = ax_main.get_xlim(), ax_main.get_ylim()
         had_view = ax_main.has_data()
         ax_main.clear()
         ax_cbar.clear()
-        values = field_values()
-        if values is not None:
-            spec = FIELD_SPECS[state["field"]]
-            plot_values = np.log10(np.maximum(values, 1e-300)) if spec["log_scale"] else values
-            tpc = ax_main.tripcolor(x_um, y_um, triangles, plot_values, shading="gouraud",
-                                     cmap=spec["cmap"])
+        tpc = _draw_into(ax_main)
+        if tpc is not None:
             cbar = fig.colorbar(tpc, cax=ax_cbar)
-            label = spec["label"]
-            cbar.set_label(f"log10({label})" if spec["log_scale"] else label)
-            if state["show_mesh"] or state["show_boundary"]:
-                overlay_layers = plot_structure2d(
-                    doc, ax=ax_main, show_mesh=state["show_mesh"], show_boundary=False)[1]
-            Va = bias_points[state["bias_idx"]]["bias"]
-            ax_main.set_title(f"{state['field']} @ Va={Va:+.3f}V")
+            spec = FIELD_SPECS[state["field"]]
+            cbar.set_label(f"log10({spec['label']})" if spec["log_scale"] else spec["label"])
         else:
             ax_cbar.axis("off")
-            plot_structure2d(doc, ax=ax_main, show_mesh=state["show_mesh"],
-                              show_boundary=state["show_boundary"])
 
-        ax_main.set_xlabel("x (um)")
-        ax_main.set_ylabel("y (um), depth from top surface")
-        ax_main.set_aspect("equal")
         if had_view:
             ax_main.set_xlim(xlim)
             ax_main.set_ylim(ylim)
@@ -257,6 +319,20 @@ def interactive_field_viewer(doc):
         if len(state["cut_pts"]) == 2:
             (x0, y0), (x1, y1) = state["cut_pts"]
             ax_main.plot([x0, x1], [y0, y1], "k--", linewidth=1.5, marker="x")
+
+        if ax_inset is not None:
+            ax_inset.clear()
+            x0, x1, y0, y1 = mesa_bbox
+            # aspect="auto" (not "equal") is what makes the mesa visible at
+            # all: a real oxide is routinely 100-1000x thinner than the
+            # gate footprint is wide, so an equal-aspect view of it is a
+            # hairline. Letting the inset's y-axis stretch to fill a
+            # roughly square panel is the same "vertically exaggerated,
+            # not to scale" convention real device cross-section diagrams
+            # use for a thin gate stack.
+            _draw_into(ax_inset, xlim=(x0, x1), ylim=(y1, y0), aspect="auto")
+            ax_inset.set_title("gate stack (y exaggerated, not to scale)", fontsize=8)
+
         fig.canvas.draw_idle()
 
     def redraw_cut():
@@ -310,13 +386,21 @@ def interactive_field_viewer(doc):
     fig.canvas.mpl_connect("button_press_event", on_click)
     fig.canvas.mpl_connect("scroll_event", on_scroll)
 
-    radio_ax.set_title("field", fontsize=9)
-    radio = RadioButtons(radio_ax, field_options, active=0)
+    field_btn = Button(field_btn_ax, f"field: structure ▾")
+    radio = RadioButtons(menu_ax, field_options, active=0)
     for label in radio.labels:
         label.set_fontsize(8)
 
+    def toggle_menu(event):
+        menu_ax.set_visible(not menu_ax.get_visible())
+        fig.canvas.draw_idle()
+
+    field_btn.on_clicked(toggle_menu)
+
     def on_field(label):
         state["field"] = label
+        field_btn.label.set_text(f"field: {label} ▾")
+        menu_ax.set_visible(False)
         redraw_main()
         redraw_cut()
 
@@ -347,8 +431,10 @@ def interactive_field_viewer(doc):
     else:
         slider_ax.axis("off")
 
-    fig.text(0.74, 0.42, "Scroll to zoom, drag toolbar's pan tool to pan,\n"
-                          "shift-click twice on the plot to slice.", fontsize=8, va="top")
+    hint_y = 0.38 if mesa_bbox is not None else 0.70
+    fig.text(col_x, hint_y, "Scroll to zoom, drag toolbar's pan tool to pan,\n"
+                             "shift-click twice on the plot to slice.",
+              fontsize=8, va="top")
 
     redraw_main()
     redraw_cut()
@@ -361,19 +447,36 @@ def main():
     parser.add_argument("structure_path", help="Path to a *_structure.json file (dim=2)")
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--interactive", action="store_true",
-                         help="Open a live window: structure/mesh/boundary toggles if no fields "
-                              "are saved, or the full field/bias/slice viewer if the structure "
-                              "file has bias_points with fields (see main2d_sweep.py).")
+                         help="Write a standalone interactive-viewer HTML file (Plotly-based: "
+                              "real dropdown field picker, bias slider, layer toggles, click-to-"
+                              "slice) and open it in the default browser - see viz2d/plot2d_web.py. "
+                              "Falls back to a plain structure-only view if the file has no "
+                              "bias_points.")
+    parser.add_argument("--mpl-interactive", action="store_true",
+                         help="Use the older matplotlib-window viewer instead of the Plotly HTML "
+                              "one (kept for reference/offline use with no browser available).")
     args = parser.parse_args()
 
     doc = sio.load_structure(args.structure_path)
 
-    if args.interactive:
+    if args.mpl_interactive:
         if doc.get("bias_points"):
             interactive_field_viewer(doc)
         else:
             ax, layers = plot_structure2d(doc)
             _interactive_show(ax, layers)
+        return
+
+    if args.interactive:
+        import webbrowser
+        from viz2d.plot2d_web import build_interactive_html
+        out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.structure_path)) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(args.structure_path))[0]
+        html_path = os.path.join(out_dir, f"{stem}_viewer.html")
+        build_interactive_html(doc, html_path)
+        print(html_path)
+        webbrowser.open("file://" + os.path.abspath(html_path))
         return
 
     ax, layers = plot_structure2d(doc)

@@ -26,7 +26,10 @@ BC tag:
 Tag priority at a corner point (contact > symmetry > free_surface): a
 contact is checked first because a contact spanning the full top/bottom
 width (as in the first diode example) should claim its corners; failing
-that, being on the left/right domain edge always means `symmetry`.
+that, being on the domain's own left/right edge always means `symmetry`
+(a mesa's vertical side walls are never `symmetry` - see geometry2d.py's
+`boundary_point_role` - they fall through to `free_surface` like any other
+uncontacted top-type surface).
 """
 from dataclasses import dataclass
 
@@ -43,45 +46,42 @@ class BoundaryTags:
 
 def tag_boundary_points(points_cm, domain):
     """points_cm: (N,2) array. Returns BoundaryTags for every point lying on
-    the domain's outer rectangle (interior points are not included)."""
-    x, y = points_cm[:, 0], points_cm[:, 1]
+    the domain's outer boundary (a plain rectangle, or a rectangle with a
+    mesa protrusion spliced in - see geometry2d.py's `boundary_point_role`;
+    interior points, including the y=0 interface line under a mesa, are not
+    included)."""
     tol_x = _EPS_REL * max(domain.width_cm, 1e-30)
-    tol_y = _EPS_REL * max(domain.height_cm, 1e-30)
 
-    on_left = np.abs(x) <= tol_x
-    on_right = np.abs(x - domain.width_cm) <= tol_x
-    on_top = np.abs(y) <= tol_y
-    on_bottom = np.abs(y - domain.height_cm) <= tol_y
-    on_boundary = on_left | on_right | on_top | on_bottom
-
-    idx = np.nonzero(on_boundary)[0]
-    tags = []
-    for i in idx:
+    idx_list, tags = [], []
+    for i, (xi, yi) in enumerate(points_cm):
+        role = domain.boundary_point_role(xi, yi)
+        if role is None:
+            continue
         tag = None
-        if on_top[i] or on_bottom[i]:
-            surface = "top" if on_top[i] else "bottom"
+        if role in ("top", "bottom"):
             for contact in domain.contacts:
-                if contact.surface != surface:
+                if contact.surface != role:
                     continue
                 x0, x1 = contact.x_range_cm
-                if x0 - tol_x <= x[i] <= x1 + tol_x:
+                if x0 - tol_x <= xi <= x1 + tol_x:
                     tag = f"contact:{contact.name}"
                     break
-        if tag is None and (on_left[i] or on_right[i]):
+        if tag is None and role in ("left", "right"):
             tag = "symmetry"
         if tag is None:
             tag = "free_surface"
+        idx_list.append(i)
         tags.append(tag)
-    return BoundaryTags(point_index=idx, bc_type=tags)
+    return BoundaryTags(point_index=np.array(idx_list, dtype=int), bc_type=tags)
 
 
 def outward_normal(p0, p1, domain):
     """Outward unit normal of a boundary segment (p0, p1) whose two endpoints
-    lie on the domain's outer rectangle. Picks whichever of the two
-    perpendiculars to the segment points away from the domain's centroid -
-    correct for the convex rectangular domains this module builds; a future
-    non-convex/irregular-shape domain would need a per-segment membership
-    test instead of a single global centroid."""
+    lie on the domain's outer boundary. Picks whichever of the two
+    perpendiculars to the segment points to a location NOT contained in the
+    domain's own material (domain.contains) - general enough for a
+    non-convex/stepped domain (e.g. a mesa protrusion), unlike a single
+    global-centroid heuristic."""
     p0 = np.asarray(p0, dtype=float)
     p1 = np.asarray(p1, dtype=float)
     edge = p1 - p0
@@ -91,8 +91,9 @@ def outward_normal(p0, p1, domain):
         raise ValueError("outward_normal: degenerate segment (p0 == p1)")
     n1 = n1 / norm
     mid = 0.5 * (p0 + p1)
-    center = np.array([domain.width_cm / 2.0, domain.height_cm / 2.0])
-    return n1 if np.dot(n1, mid - center) > 0 else -n1
+    probe_dist = 1e-6 * max(norm, 1e-30)
+    probe = mid + probe_dist * n1
+    return n1 if not domain.contains(probe[0], probe[1]) else -n1
 
 
 def decompose_normal_tangential(vec, normal):

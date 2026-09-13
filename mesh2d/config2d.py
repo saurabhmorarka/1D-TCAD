@@ -11,7 +11,7 @@ import numpy as np
 import yaml
 
 from core.config import _resolve_material_block
-from mesh2d.geometry2d import Contact, Domain2D, Region
+from mesh2d.geometry2d import Contact, Domain2D, Region, TopMesa
 
 DEFAULT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              "configs", "input_diode_2d.yaml")
@@ -48,9 +48,16 @@ def build_domain_from_config(cfg: dict) -> Domain2D:
             name=r["name"],
             x_range_cm=_range_cm(r["x_range_um"]),
             y_range_cm=_range_cm(r["y_range_um"]),
-            doping_type=r["doping_type"],
-            concentration_cm3=float(r["concentration_cm3"]),
+            doping_type=r.get("doping_type", "n"),
+            concentration_cm3=float(r.get("concentration_cm3", 0.0)),
+            kind=r.get("kind", "semiconductor"),
+            eps_r=float(r["eps_r"]) if r.get("eps_r") is not None else None,
         ))
+
+    top_mesas = [
+        TopMesa(x_range_cm=_range_cm(m["x_range_um"]), height_cm=float(m["height_um"]) * _UM_TO_CM)
+        for m in geom.get("mesas", [])
+    ]
 
     contacts = []
     for c in cfg.get("contacts", []):
@@ -61,7 +68,8 @@ def build_domain_from_config(cfg: dict) -> Domain2D:
             bias_role=c["bias_role"],
         ))
 
-    return Domain2D(width_cm=width_cm, height_cm=height_cm, regions=regions, contacts=contacts)
+    return Domain2D(width_cm=width_cm, height_cm=height_cm, regions=regions, contacts=contacts,
+                     top_mesas=top_mesas)
 
 
 def build_from_config(cfg: dict):
