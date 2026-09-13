@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+.claude/worktrees/
+# Interactive-viewer HTML files (viz2d/plot2d_web.py) are regenerable
+# build artifacts, multiple MB each (they inline every field's grid data
+# per bias point) - not worth tracking, regenerate with
+# `python3 -m viz2d.plot2d <structure.json> --interactive`.
+out/**/*_viewer.html

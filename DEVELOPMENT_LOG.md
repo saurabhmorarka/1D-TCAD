@@ -2556,3 +2556,645 @@ with SiGe on the LIGHTLY doped side (needed to actually observe either the
 narrow-gap-leakage enhancement OR a relaxed-vs-strained leakage
 difference); no resolution of the reverse-bias self-consistency open item
 for this doping/material class.
+
+## 22. Session 15: first 2D device, phase 1 - point-cloud mesh, blocky
+structure builder, contact/symmetry/free-surface boundary tags, and a new
+`viz2d` structure viewer (no solver yet)
+
+The user is ready to start the 2D extension whose direction was locked in
+back in Session 12: point-cloud meshing, a Tecplot-like-eventually but
+matplotlib-for-now interactive viewer kept separate from `core/plot.py`,
+and boundary conditions for contacts vs. default sides/top. The concrete
+first target: a planar diode where a lightly-doped p+ square is patterned
+("dug in") at the top-center of a lightly-doped n substrate - same doping
+levels as the original 1D diode example, no drift region, no extreme
+doping yet, so the new 2D machinery gets validated on already-familiar
+physics before anything else is layered on. Per the pinned show-plan
+convention, a full design (point-cloud generation, FV geometry, BC scheme,
+phasing) was written up and approved before any code -
+`~/.claude/plans/prancy-snacking-volcano.md` - with one mid-review
+correction from the user folded in before implementation: the default
+"insulating" boundary on the sides and the default on the top are not the
+same *kind* of thing even though they reduce to the same equations. Left/
+right sides are a `symmetry` boundary - a mathematical artifact of where an
+infinite/periodic structure was truncated, so it must stay zero-flux
+forever and never host future physics. The top is a `free_surface` - a
+genuine physical semiconductor/air boundary that today also reduces to
+zero normal field/current (no surface charge modeled yet, and normal-D
+continuity across a near-zero-permittivity air gap forces it), but is the
+real seam for later surface recombination, interface charge, or a partial
+gate contact (MOS-in-2D). Both tags are implemented identically for now,
+but kept as distinct strings in the mesh's boundary metadata specifically
+so a future change to `free_surface` handling can never accidentally leak
+onto `symmetry` points.
+
+**New package `mesh2d/`** (sibling to `avalanche/`/`tat/`/`mos/`, per the
+Session 12 decision that 2D meshing is new point-cloud code, not a
+`dim==2` branch inside `core/mesh.py`):
+- `geometry2d.py` - `Domain2D`/`Region`/`Contact`: blocky axis-aligned
+  rectangles with painter's-algorithm override order (a later region wins
+  at overlaps - how the p+ square gets dug into the n substrate), doping
+  evaluated by rectangle membership (`Domain2D.doping_at`), and
+  `junction_segments()`/`region_corners()` to drive meshing.
+- `pointcloud.py` - a genuine quadtree-based point cloud (not a tensor
+  grid): recursive quadrant subdivision refines toward `h_min_cm` near
+  `junction_segments()` and coarsens geometrically to `h_max_cm` in the
+  bulk (the 2D analog of `core/mesh.py`'s `growth` parameter), then a 2:1
+  quadtree-balancing pass (`_balance_2to1`) before leaf corners become
+  mesh points.
+- `fvgeometry.py` - the hardest new piece: Voronoi-box finite-volume
+  geometry built directly from a `scipy.spatial.Delaunay` triangulation
+  (no separate Voronoi-clipping step needed) - for each internal edge
+  shared by two triangles, the flux weight is the two triangles'
+  circumcenter-to-circumcenter distance divided by the edge length, and
+  each point's control-volume area is the sum of its per-triangle corner
+  quads. A boundary edge (only one adjacent triangle) is simply excluded
+  from the flux-edge list, which is the entire implementation of "default
+  insulating" - no separate Neumann assembly code needed anywhere.
+  `n_negative_subareas` flags the classic box-method pitfall (an obtuse
+  triangle pushing its circumcenter outside itself), reported instead of
+  silently corrupting the control-volume areas.
+- `boundary.py` - per-boundary-point BC tagging (`contact:<name>` /
+  `symmetry` / `free_surface`, contact-priority-then-side-priority at
+  corners) plus a general `outward_normal`/`decompose_normal_tangential`
+  utility (rotate-the-edge-vector normal, domain-centroid sign pick) meant
+  to generalize to future interface tangential-flux work, not just this
+  example's contact-current use.
+- `config2d.py` - YAML -> `Domain2D` + mesh/material options, reusing
+  `core.config._resolve_material_block` verbatim for the `material:`
+  block (material resolution has nothing dimension-specific about it).
+- `mesh2d.py` - orchestrator (`build_diode2d_mesh`) tying the above into
+  one `Mesh2D` object, the 2D analog of `core/mesh.py::build_diode_grid`.
+
+**`core/structure_io.py` extended additively**, exactly as its own
+docstring already anticipated: `build_structure()` gained optional
+`y_um=None` and `mesh2d=None` parameters (per-point y position; Delaunay
+triangle connectivity + per-point boundary tags for viz2d), both omitted
+from the doc when not given so every existing `dim=1` call site and golden
+output is byte-identical - confirmed by rerunning the full
+`testsuite/test_examples.py` golden suite (6/6 pass) plus
+`test_interface_charge`/`test_material_inheritance`/
+`test_material_temperature`/`test_materials` (31/31 pass) after the edit.
+
+**New package `viz2d/`** (separate from `core/plot.py`, per the Session 12
+decision): `plot2d.py::plot_structure2d` renders regions as colored
+rectangles, the Delaunay mesh as light gray edges, and every boundary
+point colored/labeled by its BC tag, each as an independently-toggleable
+layer (`_interactive_show`, mirroring `core/plot.py`'s `CheckButtons`
+pattern but toggling artist groups instead of per-line labels, since a 2D
+patch/scatter plot has no natural line-per-field structure to key off of).
+Field rendering (psi/n/p/current density via `tripcolor`) is deferred to
+phase 2, once a 2D solver actually produces fields.
+
+**New entry point `main2d.py`** and config `configs/input_diode_2d.yaml`
+(20um x 10um domain, p_well 6um x 3um centered at the top, both regions at
+the original 1D example's doping levels, anode contact covering only the
+p_well's top, cathode covering the full bottom width) - phase-1 driver
+only: builds the mesh/structure and saves+plots it, no solve.
+
+**Verified end to end**: `python3 main2d.py configs/input_diode_2d.yaml`
+produces 951 points / 1820 triangles / 2690 internal edges / 80 boundary
+points, writes `out/input_diode_2d/diode2d_structure.json` and
+`structure.png`. The rendered structure matches the intended geometry
+exactly: p_well square dug into the substrate top-center, anode (red)
+covering only the p_well's top span, cathode (blue) across the full
+bottom, `free_surface` (gray) on the remaining top, `symmetry` (green) on
+both sides, mesh visibly denser near the p_well's junction boundary and
+coarser in the bulk. One real mesh-quality bug found and fixed along the
+way: the first pointcloud.py draft also explicitly sampled points evenly
+along every junction segment (to land points exactly on the doping-step
+curve); those points didn't align with the independently-generated
+quadtree grid and created many sliver (near-degenerate, nearly-collinear)
+triangles - 58 negative box-method sub-areas out of ~5700. Adding 2:1
+quadtree balancing alone did not fix this (58 -> 58, confirming the
+quadtree's own recursion was already naturally graded); dropping the
+explicit segment sampling and trusting the quadtree's own h_min-scale
+refinement near junctions instead - approximating the geometry rather
+than exactly conforming to it, acceptable for a blocky first pass - cut it
+to 10 residual negative sub-areas (~0.2%, at the handful of exact
+rectangle-corner points, an expected minor residual), a concrete
+confirmation of the plan's own prediction that this would be "the
+trickiest new piece" worth checking before any solver work.
+
+**Not done this session (explicitly phase 2/3, per the approved plan)**:
+no 2D solver yet (`mesh2d/newton_solver_qf_2d.py`, QF/plain-gradient-flux
+formulation, is phase 2); no field rendering in `viz2d` (needs solved
+fields to exist first); no normal/tangential-based terminal current
+extraction (needs a solve to integrate); no finite-difference Jacobian
+validation or 1D-diode sanity comparison (both are phase-2 verification
+steps, not applicable with no solver yet). The residual 10 negative
+box-method sub-areas are a known, small, documented mesh-quality residual
+at rectangle corners, not blocking - worth a closer look if phase 2's
+solver shows any oddities specifically near a region corner.
+
+## 23. Session 15 (continued): the first working 2D Newton solve - four
+real bugs found via finite-difference Jacobian checking, none of them
+where they were expected
+
+Phase 2 of the plan approved last session: `mesh2d/newton_solver_qf_2d.py`,
+the point-cloud generalization of `core/newton_solver_qf.py`'s 1D
+quasi-Fermi-potential formulation. Same unknowns (psi, phin, phip) and
+plain-gradient current, assembled via mesh2d/fvgeometry.py's box-FV
+geometry: for each internal Delaunay edge, contributions are scattered to
+both endpoints' rows and scipy.sparse.coo_matrix's automatic duplicate-
+summing does the accumulation 1D achieves via its two named e_lo/e_hi
+edges. Contact points get Dirichlet rows exactly like 1D's (scaled-
+identity diagonal); `symmetry`/`free_surface` points get no special
+handling at all - a point's control volume just has fewer incident edges,
+which is the entire implementation of the default-insulating boundary.
+
+**The verification gate the plan itself specified - a finite-difference
+Jacobian check - is what actually caught every bug below.** None of them
+were in the obviously-scary new code (the box-FV geometry, the edge-
+vectorized derivative formulas); they were all in details that looked
+fine on inspection and only showed up as a genuinely irreproducible mess
+until isolated one at a time:
+
+1. **Dirichlet-row comparison was a false alarm, not a bug.** The very
+   first FD run showed relative error ~1e13 at what turned out to be
+   contact rows' own diagonal - by design (matching
+   `newton_solver_qf.py`'s own `max(1.0, local_max)` scaled-identity
+   Dirichlet trick), that diagonal is NOT the true derivative (which is
+   exactly 1). Excluding Dirichlet rows from the check is correct, not a
+   workaround.
+2. **A genuine mesh-generation bug, caught by a real column mismatch.**
+   With Dirichlet rows excluded, a specific edge's Jacobian entry
+   (-5.18, matching a hand-verified formula) disagreed with an FD result
+   of exactly 0.0. Traced to a Delaunay edge whose two triangles had
+   near-coincident circumcenters (`facet_length` ~6.5e-18cm, floating-
+   point noise, not a real ~0 facet) - the classic "Delaunay-of-a-grid"
+   degeneracy: a quadtree's corner points form locally regular square
+   patches, and splitting a square gives right triangles whose
+   circumcenter sits exactly on the shared hypotenuse's midpoint,
+   letting adjacent triangles' circumcenters coincide almost exactly.
+   Fixed by jittering every non-boundary point by a small deterministic
+   offset (~2% of h_min, seeded so the mesh stays reproducible) before
+   triangulating - large enough to break the exact grid symmetry, small
+   enough not to reopen the 2:1-balance obtuse-triangle count (stayed at
+   10 negative sub-areas, unchanged from last session).
+3. **A genuine, and more consequential, scaling bug in
+   `continuity_row_scale`.** Even after fix #2, FD checks kept failing at
+   nodes whose residual/Jacobian entries were absurdly large (~1e11-1e13)
+   for no apparent local reason. Traced by first isolating the SOLVER
+   from the MESH: building a small, clean, non-adaptive uniform test
+   mesh (zero negative sub-areas) reproduced the same absurd magnitudes,
+   proving the bug was in the solver's scaling, not the mesh. Root cause:
+   `continuity_row_scale` was copied from 1D verbatim
+   (`Q*Dn*ni/h_typ`), but 1D's continuity row divides a flux-density
+   difference by `cvol_i`, a control-volume LENGTH (~h_typ); this
+   module's 2D row instead divides by `cv_area`, a control-volume AREA
+   (~h_typ**2) - one power of h_typ short. Fixed by making it
+   `Q*Dn*ni/h_typ**2`, matching `poisson_row_scale`'s own (already-
+   correct) h_typ**2 convention. This dropped typical (median) row
+   magnitudes from ~1e10 to O(1-10), where they belong.
+4. **A related but distinct h_typ bug**: `h_typ` was originally derived
+   as `np.min(actual edge lengths)`, not the mesh generator's own
+   intended `h_min_cm` - and since this ONE global value sets every
+   row's normalization for the WHOLE system, a single edge shrunk below
+   h_min by fix #2's own jitter (an expected, harmless side effect there)
+   was silently corrupting every other row's conditioning. Fixed by
+   threading `h_min_cm` through onto the `Mesh2D` object and using that
+   directly, never a derived `np.min(edges)`.
+5. **A genuine, separate mesh-quality issue found alongside the scaling
+   bugs**: a real (not floating-point-noise) minority of points near
+   quadtree 2:1-balance transitions end up with a `cv_area` far smaller
+   than their neighbors' (the box method's per-triangle corner-quad
+   split can attribute most of a shared region's area to one node and
+   almost none to another). Per the project's mesh-robustness principle
+   (prefer a discretization-level regularization over a mesh-only patch),
+   added a `cv_area_floor` to `build_fv_geometry` (a fraction of
+   `h_min_cm**2`, tuned to 0.1x after 0.5x proved so lenient it floored
+   over a quarter of all points - the median cv_area itself sits close to
+   h_min**2/2, so a floor much above that stops being a targeted fix and
+   starts overriding normal mesh behavior).
+6. **A genuine isolated-point bug, the one that actually blocked
+   convergence outright.** Even after 1-5, Newton's very first linear
+   solve raised `MatrixRankWarning: Matrix is exactly singular`. Traced
+   to exactly 2 points - the (0,0) and (width,height) domain corners -
+   having ZERO internal (2-triangle) edges: each corner's one triangle's
+   only non-boundary edge (the corner square's diagonal) wasn't shared by
+   any neighboring triangle, an occasional Delaunay/jitter quirk. An
+   isolated point has no Poisson/continuity coupling to the rest of the
+   system, making its own local 3x3 Jacobian block exactly singular.
+   Fixed in `mesh2d/mesh2d.py::_drop_isolated_points`: detect any
+   zero-degree point after triangulating and drop-and-retriangulate
+   (iterating defensively in case that ever isolates a different point,
+   not observed in practice).
+7. **A separate, expected convergence failure, recognized rather than
+   chased**: starting Newton from the natural equilibrium guess
+   (phin0=phip0=0 exactly everywhere) is EXACTLY the same "flat interior
+   at Va=0" singular critical point `core/newton_solver_qf.py`'s own
+   comments already document for 1D (there recovered via a Gummel
+   restart) - confirmed directly (same `MatrixRankWarning`, reproducible
+   even after fixes 1-6). Rather than port a full Gummel solver to 2D for
+   this first mild case, used the cheap version of the same idea: perturb
+   phin0/phip0 by a tiny (~1e-6*Vt) deterministic random offset before
+   the first Newton step, just enough to break the exact degeneracy.
+
+**Result once all of the above were fixed**: equilibrium (Va=0) converges
+with clean quadratic Newton behavior - |F|_inf 3.4e2 -> 2.2e1 -> 6.0 ->
+1.6 -> 2.8e-2 -> 9.4e-6 -> 2.0e-12 over 7 iterations, every step a full
+Newton step (no line-search backtracking needed once past the singular
+starting point). Forward bias (Va=0.3V, 0.5V) and moderate reverse bias
+(Va=-1.0V) all converge with no warnings. **1D-diode sanity check passed**:
+a vertical field cut through the p_well's center (x=10um, away from its
+edges) at Va=0.3V shows psi=-0.117V in the p+ bulk (exactly
+psi_eq(p-well)+0.3V=-0.417+0.3, confirming the applied bias landed
+correctly), a smooth monotonic transition through the junction at y~3um
+(matching the p_well's configured depth), psi settling to ~0.36V in the
+n-substrate bulk, n/p majority concentrations matching Na/Nd exactly, and
+p decaying as the expected minority-carrier diffusion profile with depth
+- textbook 1D pn-junction behavior recovered from a genuinely 2D
+point-cloud solve. Va=-2.0V does NOT converge cleanly yet (overflow
+warnings, residual stalls at ~1e-2) - an expected robustness gap (no
+Bank-Rose-style damping or Gummel-restart recovery ported to 2D yet, by
+design deferred per the plan's phasing) rather than a blocker for this
+session's mild-doping validation goal.
+
+**Not done this session**: full `viz2d` field rendering (psi/n/p/current
+density via tripcolor - needs the solver, which now exists, but wiring it
+into `viz2d`/`main2d.py` end-to-end is still open); normal/tangential-
+based terminal I(V) extraction; reverse-bias robustness beyond -1V (no
+Gummel-restart or damping layer ported to 2D); a full bias sweep driver
+mirroring `core/solver.py::voltage_sweep`. All explicitly phase 3 per the
+approved plan.
+
+## 24. Session 15 (continued again): mesh quality made a mandatory,
+device-generic pre-flight gate, and the hand-rolled quadtree replaced
+with Shewchuk's `triangle` library after a live user correction
+
+Mid-session, the user pushed back on the mesh-quality diagnostics being
+something only checked when someone happened to go digging: "the mesh
+quality... needs to be the first check for every run. If the mesh is bad,
+it needs to be fixed every time right before the simulation starts" - and
+separately, that this can't stay diode-specific ("many times the user
+will set the mesh properties... it should be checked for every kind of
+run"), and asked directly what mesh-quality criterion the literature
+actually requires for this class of solver.
+
+**Research finding** (Fleischmann's TU Wien device-simulation-meshing
+thesis, https://www.iue.tuwien.ac.at/phd/fleischmann/node15.html, and the
+"Why do we need Voronoi cells and Delaunay meshes?" paper): the real
+requirement for the Voronoi/box finite-volume method is a **non-obtuse**
+triangulation, strictly stronger than plain Delaunay (Delaunay only
+bounds the angle SUM opposite a shared edge at <=180 deg; a single obtuse
+angle still pushes that triangle's own circumcenter outside it, which is
+exactly what corrupts the box method's per-triangle area split). The same
+source states this is achievable in 2D but an OPEN PROBLEM in 3D.
+
+**A first attempt at enforcing it directly failed, informatively.** Built
+`mesh2d/mesh_quality.py::refine_non_obtuse` - insert each obtuse
+triangle's own circumcenter as a Steiner point and re-triangulate,
+repeating. Empirically this made things WORSE, not better (obtuse-triangle
+count diverged: 106 -> 119 -> 153 -> 204 -> 270 -> 368 over six passes,
+ending at 18.3% obtuse with a 171 deg worst angle, versus 27.7%/135 deg
+before "fixing" anything) - naive circumcenter insertion is a known-bad
+technique for exactly this reason (real algorithms like Ruppert's/Chew's
+use more careful off-center insertion and segment-encroachment checks,
+which plain circumcenter insertion skips), so it was discarded rather than
+shipped as a silently-unreliable "fix."
+
+**Root cause of the underlying badness, separately diagnosed**: the old
+`mesh2d/pointcloud.py` quadtree generator produced ~28% obtuse triangles
+(worst angle up to 152 deg) structurally, not incidentally - splitting a
+square quadtree cell by its diagonal always gives two right-triangles,
+and jittering (tested at magnitudes from 0.02x to 0.3x h_min) only made
+the obtuse fraction WORSE (27.7% -> 39.7% as jitter grew), since a random
+perturbation of a square-grid point set doesn't systematically improve
+triangle shape, just reshuffles which triangles are bad.
+
+**Fix, presented to the user as an explicit choice (adopt an external
+mesh-quality library vs. patch further vs. hand-roll a proper fix) and
+approved**: adopted Shewchuk's `triangle` (Ruppert/Chew-style constrained
+conforming-Delaunay refinement - the standard, literature-established
+tool for exactly this problem) as a new dependency. `mesh2d/pointcloud.py`
+was rewritten around it: a PSLG (domain + every region's rectangle
+boundary as explicit segments, so the mesh is now EXACTLY geometrically
+conformal to the p-well - not just approximated at quadtree resolution
+like before) triangulated with a provable minimum-angle guarantee
+(`'pq32Da...'`), then graded toward `h_min_cm` near
+`interface_segments` (default: doping-junction boundaries, but now an
+explicit, overridable parameter - directly enabling the user's separately
+requested "interface-based mesh, tight along an interface and relaxing
+beyond it" as a first-class option rather than something tied to doping
+geometry specifically) via `triangle`'s own refine mode
+(`triangle_max_area` per existing triangle, iterated to convergence).
+
+Confirmed empirically that `triangle`'s own quality guarantee is a
+MINIMUM-angle bound only (Ruppert's theorem), not maximum - even at
+q32-34 deg (near the practical reliability ceiling for the algorithm to
+still terminate), the graded p-well mesh still came out ~13-16% obtuse
+(worst angle ~110-120 deg). This is a genuine, literature-confirmed
+limitation of the whole class of algorithm, not a bug to keep chasing -
+`mesh2d/mesh_quality.py` was rewritten accordingly to gate on what's
+actually guaranteed (raise if any triangle's minimum angle falls below a
+15 deg floor - a real failure of `triangle`'s own refinement, not an
+expected residual) and report the obtuse fraction as a mandatory,
+every-run WARNING rather than a hard failure, since `mesh2d/fvgeometry.py`'s
+existing `cv_area_floor` regularization already makes the solver safe
+against whatever residual remains.
+
+**Made the whole pipeline device-generic, not diode-specific**, per the
+user's explicit ask: `mesh2d/mesh2d.py::build_diode2d_mesh` renamed to
+`build_mesh2d` (old name kept as an alias for this session's existing
+call sites) - it already only ever depended on a generic `Domain2D`, so
+this was a naming fix, not a behavior change, but an important one: the
+mandatory quality gate now unambiguously applies to every future 2D
+device (MOS-in-2D, etc.) that goes through this one entry point, not just
+this session's diode example.
+
+**Re-verified end to end on the new pipeline**: the resulting mesh for
+the same p-well diode config has 371 points/692 triangles (down from the
+old quadtree's 951/1820 - `triangle`'s exact geometric conformity needs
+far fewer points to represent the same graded sizing), zero negative
+box-method sub-areas and zero floored control volumes (both were nonzero
+under the old quadtree mesh even after its own fixes - a genuine quality
+improvement, not just a different way of hiding the same problem).
+Equilibrium Newton solve converges in 8 iterations to |F|_inf=2.0e-12
+(matching the old mesh's clean convergence); Va=0.3V/0.5V converge
+cleanly; Va=-1.0V converges to 2.5e-8 with some intermediate line-search
+overflow warnings that got backtracked past successfully - the same known,
+not-yet-hardened reverse-bias gap flagged earlier, unaffected by this
+mesh-generator swap. Full `testsuite/test_examples.py` golden suite still
+6/6 (no 1D code touched).
+
+**Also answered in-session (no code change)**: a user question about
+octree - it is exactly the 3D analog of quadtree (a cube split into 8
+children instead of a square into 4), used the same way for adaptive 3D
+spatial refinement; the natural 3D analog of this session's whole
+lesson would be an octree background grid paired with a proper quality-
+guaranteed TETRAHEDRALIZER (e.g. TetGen, by the same research lineage as
+`triangle`) rather than naive Delaunay-of-octree-corners, for the same
+reason raw quadtree+Delaunay failed here.
+
+**Not done this session**: a literal, guaranteed-zero obtuse-triangle
+mesh (confirmed above to be beyond what mainstream tooling delivers for a
+graded mesh; the project now tracks and mitigates a bounded residual
+rather than chasing an unachievable bound); `interface_segments`
+threaded through `mesh2d/config2d.py`'s YAML schema (the parameter exists
+in `build_mesh2d` and is used internally for the doping-junction default,
+but there is no YAML key yet for a user to specify an independent,
+non-doping interface directly - the mechanism is built, the config
+surface for it is not).
+
+## 25. Session 15 (continued a third time): warm-started bias sweep, a
+real terminal-current bug traced to corner field-crowding, full 1D-vs-2D
+I-V comparison, and a multi-field/multi-bias interactive viewer
+
+The user asked to see the full -1V to +1V run's results, then to fix the
+handful of sweep points that failed to converge, then to see an actual
+I-V curve compared quantitatively against the 1D diode (both linear and
+log scale), then for a runtime comparison, then for the structure/viewer
+to support saving and browsing every field at every requested bias point
+with layer toggles and a slicing tool - each building directly on the last.
+
+**Sequential warm-starting**: `newton_solve_2d` gained `psi_init`/
+`phin_init`/`phip_init` parameters (mirroring `core/newton_solver_qf.py`'s
+own signature) and a cold-start retry if a warm start still doesn't
+converge (the one piece of 1D's Gummel-restart robustness layer this
+needed, not a full 2D Gummel solver). `main2d_sweep.py::sweep_2d` walks
+outward from Va=0 in both directions, warm-starting each point from its
+already-converged neighbor - exactly `core/solver.py::voltage_sweep`'s own
+continuation trick. Result: 21/21 swept points converged (vs 2 failures
+out of 21 with independent cold starts per point last session).
+
+**Terminal current extraction, and a real bug it caught immediately**:
+`mesh2d/current.py::contact_current`/`contact_current_density` integrate
+the SAME plain-gradient edge-current formula the solver's own residual
+uses (not a separate, possibly-inconsistent post-processing formula) over
+every mesh edge connecting a contact point to a non-contact neighbor,
+matching `mesh2d/boundary.py`'s normal-current-integration design intent
+from phase 1. The first I-V comparison against a matching 1D diode (same
+Na/Nd/material) was badly wrong - reverse-bias current ~100 A/cm^2 (should
+be a tiny, near-flat saturation current like 1D's ~1e-6 A/cm^2) and even
+sign-flipped in places. Traced to exactly ONE mesh edge per run dominating
+the total by 5-6 orders of magnitude over every other edge combined -
+always at the p_well's exact CORNERS (where the vertical junction meets
+the free surface). This is a real, physical convex-corner field-crowding
+effect under-resolved by the mesh, not a formula bug: halving `h_min_um`
+(0.3 -> 0.15um in `configs/input_diode_2d.yaml`) made the anomalous
+corner-edge current vanish (from -0.109 A/cm to a sane -1.3e-8 A/cm),
+confirmed as a genuine mesh-resolution fix (not a lucky coincidence) by
+checking a third, finer h_min value showed the same trend.
+
+**Result once fixed**: the 2D anode-averaged J(Va) and the 1D diode's own
+J(Va) track closely across the full -1V to +1V range on BOTH linear and
+semilog axes (`out/input_diode_2d/iv_comparison_1d_vs_2d.png`) - including
+matching reverse-bias saturation current to within the same order of
+magnitude and a physically-sensible 2D edge-enhancement at high forward
+bias (2D running somewhat above 1D, expected from the finite contact
+width's current crowding).
+
+**Runtime comparison** (also requested): 2D sweep totals 3.45s for 21
+points (0.164s/point avg, 733 mesh points) vs 1D's 0.254s (0.012s/point
+avg, 241 nodes) - roughly 13.6x slower per point for a problem only ~3x
+larger, explained by 2D's ~6-neighbor-per-point sparsity (vs 1D's fixed 2)
+giving denser Jacobians and more direct-solve fill-in.
+
+**PETSc/"bring in every industry speedup" scoped, not implemented**: the
+user asked broadly for this; before touching anything, flagged that
+direct sparse LU (today's approach) is actually the RIGHT tool at this
+problem's current size (a few hundred to ~2000 unknowns) - iterative
+Krylov/PETSc solvers only start winning once direct fill-in becomes
+prohibitive, typically tens-of-thousands-plus unknowns. User agreed:
+defer PETSc adoption until a mesh actually reaches that scale (finer 2D or
+3D work), and benchmark against direct LU at that point rather than
+assuming PETSc wins - not implemented this session, deliberately.
+
+**Structure now saves every (or any user-requested) bias point's full
+fields**: `configs/input_diode_2d.yaml` gained `voltage_sweep:` (va_start_V/
+va_stop_V/va_points) and `output.save_bias_points` - the EXACT same
+"all"/"last"/[list] convention as 1D's own `output.save_bias_points`,
+parsed by the SAME `core/field_save.py::resolve_save_points` (already
+dimension-agnostic, no changes needed). `main2d_sweep.py` now writes a
+`diode2d_structure.json` with every requested bias point's full psi/n/p/
+phin/phip fields via `core/structure_io.py`'s existing (already-generic)
+`bias_points` schema key.
+
+**New interactive viewer**: `viz2d/plot2d.py::interactive_field_viewer` -
+a RadioButtons field picker (structure-only, or any saved field), a Slider
+over saved bias points, the existing structure/mesh/boundary layer toggles
+(reused from `plot_structure2d`), and a click-to-slice tool (two clicks on
+the main plot draw a cut line and interpolate the current field along it
+into a side panel, via `scipy.interpolate.griddata`). Invoked via
+`python3 -m viz2d.plot2d <structure.json> --interactive` (falls back to
+the phase-1 structure-only viewer if the structure file has no
+`bias_points`). Core rendering/slicing logic verified headlessly (tripcolor
+render + griddata slice both produce clean, NaN-free output on the actual
+21-bias-point structure file); the live widget wiring itself (RadioButtons/
+Slider/click handling) could not be visually screenshotted in this
+headless environment and should be spot-checked on a machine with a
+display before relying on it.
+
+**Not done this session**: PETSc/iterative-solver adoption (deliberately
+deferred, see above); visual/manual verification of the interactive
+viewer's widget wiring on a real display; a YAML config surface for
+`interface_segments` (still open from earlier this session).
+
+**Immediate follow-up correction from the user**: saving full spatial
+fields (every field, at every mesh point) for EVERY swept bias point was
+the wrong default - it should be a small, user-chosen subset (heavy data),
+while the lightweight terminal current should always be recorded for
+every point regardless, without the user having to ask. This is exactly
+the split `main.py` already uses for the 1D diode (`iv_sweep.csv` every
+point vs `fields_by_bias.csv` a chosen subset) - `main2d_sweep.py` was
+missing its own equivalent of the first half. Fixed: `iv_sweep.csv`
+(Va, J_anode, res_norm, iters) is now written unconditionally for every
+swept point; `configs/input_diode_2d.yaml`'s `output.save_bias_points`
+default changed from `"all"` to a 5-point list
+(`[-1.0, -0.5, 0.0, 0.5, 1.0]`), dropping the structure JSON from ~412KB
+(21 full field sets) to a much smaller 5-point file with no loss of the
+terminal I-V data driving the comparison plot.
+
+## 26. Session 16: first 2D MOS capacitor - a non-rectangular mesa domain,
+heterogeneous-permittivity box-FV geometry, and a validated 2D low-
+frequency C-V sweep matching the 1D reference
+
+**Goal**: extend the 2D infrastructure (mesh2d/solver2d/viz2d) to a MOS
+capacitor - same oxide + ideal metal gate physics as the 1D MOS capacitor
+(`mos/`), patterned the same way the diode's p+ square was (a gate/oxide
+stack centered over the same 6um-wide footprint), sitting on top of a
+light p substrate block, with correct mesh resolution at the oxide/silicon
+interface, and a 2D C-V curve matching the 1D reference.
+
+**Geometry generalization - a mesa protrusion, not a dug-in region**: the
+user explicitly chose the more physically realistic option when asked -
+the oxide protrudes ABOVE the flat substrate top surface (like a real
+gate stack), rather than a simpler "full-width oxide blanket with a
+patterned gate contact" alternative that would have kept the domain a
+plain rectangle. This required genuinely generalizing `mesh2d/geometry2d.py`
+beyond a rectangle domain for the first time:
+- `Region` gained `kind="insulator"` (already anticipated, unused until
+  now) and an `eps_r` override field.
+- New `TopMesa` dataclass: a protrusion's footprint (x-range + height),
+  purely for outer-boundary-shape/BC-tagging purposes - the mesa's actual
+  material fill is a separate `Region` with `y_range_cm[0] < 0` (the
+  domain's signal that a region protrudes above the flat top rather than
+  being dug into it).
+- `Domain2D.outer_boundary()` builds the stepped polygon (base rectangle's
+  top edge with a notch spliced in per mesa); `Domain2D.contains()` and
+  `Domain2D.boundary_point_role()` replace the old rectangle-only
+  membership tests with general ones (the latter classifies a boundary
+  point as left/right/bottom/top/mesa_wall); `outward_normal()` in
+  `mesh2d/boundary.py` was rewritten from a centroid heuristic (only valid
+  for a convex rectangle) to a `domain.contains()` probe-point test, which
+  is correct for any shape.
+- `mesh2d/pointcloud.py::_domain_pslg` now builds this polygon instead of
+  a hardcoded rectangle; a mesa's own material region only contributes ONE
+  new interior segment (its oxide/silicon interface) since its other three
+  sides already coincide with the outer polygon's notch - reusing those
+  vertices instead of duplicating them.
+- A very pleasant side effect of this design: `Domain2D.junction_segments()`
+  needed NO changes at all to start including the oxide/silicon interface
+  as a mesh-refinement target - it already excludes segments lying on the
+  domain's own outer boundary, and once the interface become genuinely
+  interior (below the protruding mesa) rather than being on the boundary,
+  it started passing that existing test automatically.
+
+**Heterogeneous-permittivity box-FV**: `mesh2d/fvgeometry.py::build_fv_geometry`
+gained an optional `eps_tri` (per-triangle permittivity) parameter. Each
+internal edge's Voronoi facet (the segment C1-C2 between its two adjacent
+triangles' circumcenters) is split at its own midpoint M - which lies on
+the same perpendicular bisector as C1 and C2, since all three are by
+definition equidistant from the edge's endpoints - into a d1=\|M-C1\| piece
+belonging to triangle 1 and a d2=\|M-C2\| piece belonging to triangle 2,
+giving an edge conductance eps_tri1*d1/edge_len + eps_tri2*d2/edge_len -
+the exact box-FV generalization of a uniform eps*facet_len/edge_len to a
+piecewise-constant permittivity field, needed for correct D-field
+continuity at the oxide/semiconductor interface. `mesh2d/mesh2d.py::build_mesh2d`
+gained an optional `mat` parameter that turns this on (computing per-
+triangle eps from `domain.material_props_at` at each triangle's centroid)
+and also populates `Mesh2D.ni_arr`/`is_insulator` (0/True at an insulator
+point) - omitting `mat` (the diode's own call site) reproduces the
+existing homogeneous-silicon behavior byte-for-bit.
+
+**New solver - much simpler than the diode's**: `solver2d/poisson2d_mos.py`
+solves ONLY for psi (no phin/phip unknowns, no continuity equations at
+all) - exactly mirroring `mos/mos_solver.py`'s own reasoning that a MOS
+capacitor carries zero steady-state current, so the whole structure is a
+sequence of independent nonlinear-Poisson equilibrium solves, one per gate
+voltage, with phin/phip prescribed (not solved) rather than unknowns. Reuses
+`mos.mos_analytic.flatband_voltage` directly (already dimension-agnostic)
+for the ideal-metal gate's Dirichlet BC. `solver2d/mos_charge2d.py::gate_charge`
+extracts the induced gate charge via the same "Dirichlet-node reaction
+flux" trick `solver2d/current.py::contact_current` already uses for
+terminal current, applied to eps*dpsi/dn instead of an electron/hole
+current - since n=p=Cdop=0 identically at every oxide node, the sum over a
+gate node's incident edges of `edge_g*(psi_neighbor-psi_gate)` IS exactly
+its own induced free charge, with no extra bookkeeping needed. `cv_sweep_2d`
+sweeps VG with warm-starting (mirroring the diode's own bias-sweep
+continuation) and differentiates Qs(VG) numerically for C_lf, matching
+`mos/mos_solver.py::cv_sweep`'s own low-frequency half exactly (high-
+frequency is out of scope for this pass, per an explicit user choice).
+
+**Two real bugs found before the first correct C-V result**:
+1. `psi_bc` was accidentally passed to the residual/Jacobian assembly as
+   BOTH a full-size (N) array in one call path and a contact-only-sized
+   restricted array in another, so `Rpsi[is_contact] = psi[is_contact] -
+   psi_bc` raised a broadcast `ValueError` the first time a bias point
+   after VG=0 tried to warm-start. Fixed by always passing the full-size
+   array through the residual/Jacobian functions and indexing it with
+   `is_contact` internally, rather than pre-indexing at the call site.
+2. The oxide was originally meshed as a SINGLE degenerate triangle layer
+   top-to-bottom (confirmed directly: only 2 distinct y-values existed
+   anywhere inside the 10nm oxide region) - because mesh grading was only
+   pulling tight from ONE side of the thin gap (the oxide/silicon
+   interface, `domain.junction_segments()`'s default target); the
+   distance-based target spacing relaxes almost immediately across a gap
+   this thin, and `triangle`'s max-area refinement constraint alone
+   doesn't force extra layers in a particular direction - it happily
+   satisfies area with one long, thin, near-degenerate triangle instead.
+   This silently produced a garbage (~30% too low) accumulation/inversion
+   capacitance plateau that still LOOKED like a plausible C-V curve at a
+   glance - the kind of bug that would have shipped unnoticed without
+   comparing the plateau's absolute value against the 1D reference. Fixed
+   by passing BOTH the oxide/silicon interface AND the mesa's own top
+   surface as `interface_segments` to `build_mesh2d`, pulling the grading
+   tight from both sides of the gap and forcing genuine multi-layer
+   vertical resolution (1603 points -> 8051 points for this config).
+   Uncovered a latent, unrelated bug in the process: `_target_spacing`'s
+   `growth ** (dist / h_min)` raises a plain Python `OverflowError` (not
+   numpy's silent `inf`) for a large exponent, which a very small `h_min`
+   relative to the domain size (nanometers vs microns here) reaches easily
+   - fixed by capping the exponent before evaluating the power, not after.
+
+**Result**: the 2D low-frequency C-V curve matches the 1D reference
+closely after the fixes above - same threshold-voltage location, same
+depletion minimum, accumulation/inversion plateaus within ~5-6% of the 1D
+value (a reasonable numerical-resolution gap, not a qualitative
+mismatch). 31/31 swept points converged. The 2D mesh (8051 points, needed
+for correct oxide resolution) runs ~300-350x slower per point than the 1D
+solve (122 nodes) - expected given how much finer the oxide-region
+resolution has to be relative to the substrate's own bulk mesh.
+
+**Viewer follow-up**: the user noticed the oxide "wasn't visible" in the
+interactive viewer - it genuinely was in the data (grid points at y<0
+existed) but was invisible at the structure's true aspect ratio, since the
+oxide is 1000x thinner than the substrate is deep. Added a dedicated
+"gate stack" inset panel (`viz2d/plot2d.py::mesa_bbox_um` +
+`interactive_field_viewer`'s new `ax_inset`) that crops tightly to the
+mesa region and deliberately uses `aspect="auto"` instead of `"equal"` -
+letting the y-axis stretch to fill a roughly square panel is what actually
+makes a nanometer-thin layer visible at all, the same "vertically
+exaggerated, not to scale" convention real device cross-section diagrams
+use for a thin gate stack.
+
+**Electric field as a saved/viewable quantity**: user asked for Ex/Ey to
+be available as fields, for any 2D device, not just the MOS capacitor.
+Added `solver2d/efield2d.py::electric_field_2d` - standard P1 finite-
+element vertex-gradient recovery (each triangle's own vertex values of psi
+determine ONE constant gradient, via a plain 2x2 linear solve from two
+edge vectors; each point's field is the area-weighted average of every
+incident triangle's gradient), independent of the box-FV edge/circumcenter
+machinery the solver itself uses to solve for psi. Wired into both
+`main2d_sweep.py` (diode) and `main2d_mos_sweep.py` (MOS) at the same
+point full fields are already being saved for a bias point, and exposed as
+two new selectable fields (`Ex`, `Ey`, V/cm, diverging colormap like psi)
+in `viz2d/plot2d.py::FIELD_SPECS`. Verified on the MOS structure: Ey peaks
+around -1.1 MV/cm right at the oxide/silicon interface at VG=-1V
+(accumulation) - physically the right sign and right location.
+
+**Not done this session**: high-frequency (frozen-minority-carrier) 2D
+C-V; a YAML config surface for `interface_segments` in the diode driver
+(still open from earlier); PETSc/iterative-solver adoption (still
+deliberately deferred).

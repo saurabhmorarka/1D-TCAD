@@ -1,0 +1,83 @@
+# First 2D device: a p+ square patterned ("dug in") at the top-center of an
+# n substrate - the 2D analog of configs/input_diode.yaml. No drift region
+# and no extreme/asymmetric doping yet: both regions are lightly doped, same
+# levels as the original 1D diode example, so this validates the new
+# point-cloud mesh/structure/BC machinery on familiar physics before adding
+# any 2D-specific complexity.
+#
+# Domain convention: x in [0, width_um], y in [0, height_um], y=0 is the top
+# (free) surface, y=height_um is the bottom of the substrate. Left/right
+# (x=0, x=width_um) are always the `symmetry` boundary - never a contact.
+
+geometry:
+  width_um: 20.0
+  height_um: 10.0
+
+  substrate:
+    doping_type: n
+    concentration_cm3: 1.0e16
+
+  regions:
+    - name: p_well
+      doping_type: p
+      concentration_cm3: 1.0e17
+      x_range_um: [7.0, 13.0]   # centered in the 20um-wide domain
+      y_range_um: [0.0, 3.0]    # dug in 3um from the top surface
+
+contacts:
+  # Anode sits directly on top of the p+ square only - the rest of the top
+  # surface (outside this x_range) defaults to `free_surface` (see
+  # mesh2d/boundary.py).
+  - name: anode
+    surface: top
+    x_range_um: [7.0, 13.0]
+    bias_role: anode
+
+  # Cathode covers the full bottom width.
+  - name: cathode
+    surface: bottom
+    x_range_um: [0.0, 20.0]
+    bias_role: cathode
+
+material:
+  # Silicon defaults (same as input_diode.yaml) - leave commented out.
+  # eps_r: 11.7
+  # ni_cm3: 1.0e10
+
+mesh:
+  # Point-cloud spacing, in um. h_min applies at the p_well's junction
+  # boundary, h_max in the bulk far from it; growth controls how fast
+  # spacing coarsens with distance (see mesh2d/pointcloud.py). 0.15um (not
+  # the initially tried 0.3um) is needed here specifically because the
+  # p_well's corners (where its vertical junction meets the free surface)
+  # are convex-corner field-crowding points - a real physical effect, not a
+  # solver artifact - and 0.3um under-resolved it badly enough to corrupt
+  # the extracted anode terminal current by 6+ orders of magnitude at
+  # reverse bias (one corner edge's current dominated the whole device's
+  # true bulk current).
+  h_min_um: 0.15
+  h_max_um: 1.5
+  growth: 1.3
+
+voltage_sweep:
+  va_start_V: -1.0
+  va_stop_V: 1.0
+  va_points: 21
+
+output:
+  structure_file: diode2d_structure.json
+  # Which Va values (nearest swept match) to save FULL SPATIAL field
+  # profiles (psi, n, p, phin, phip AT EVERY MESH POINT) for, into
+  # structure_file - same convention as input_diode.yaml's
+  # output.save_bias_points (see core/field_save.py::resolve_save_points,
+  # reused as-is for 2D):
+  #   a list of specific voltages, e.g. [-1.0, 0.0, 0.5, 1.0]
+  #   "all"  - save every swept bias point (can make a large file for a
+  #            fine 2D mesh - pick a handful of representative points
+  #            instead unless you actually need every one)
+  #   "last" - save only the last (most forward) swept point
+  # The lightweight terminal current density at EVERY swept point is
+  # always written to iv_sweep.csv regardless of this setting - see
+  # main2d_sweep.py, mirroring main.py's own iv_sweep.csv/fields_by_bias.csv
+  # split for the 1D diode.
+  save_bias_points: [-1.0, -0.5, 0.0, 0.5, 1.0]
