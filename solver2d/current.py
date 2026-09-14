@@ -46,21 +46,31 @@ def contact_current(mesh, mat, result, contact_name):
     mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
     mu_n_e = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
     mu_p_e = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
-    # 2026-09-13: the semiconductor/insulator no-flux edge mask
-    # (newton_solver_qf_2d.py::_semiconductor_edge_mask, still defined
-    # there for a later pass) is deliberately NOT applied here for now -
-    # kept consistent with the solver's own residual assembly, which backed
-    # this out too (see the matching comment there) because it made
-    # near-threshold/off-state convergence much slower across the whole
-    # sweep. Known consequence: the flat off-state "leakage" floor from the
-    # contact/oxide corner edge is back - tracked as a deferred issue, to
-    # be solved in the 1D diode first per the user's own direction.
     Jn_e = -Q * mu_n_e * n_avg * (phin[jj] - phin[ii]) / edge_len
     Jp_e = -Q * mu_p_e * p_avg * (phip[jj] - phip[ii]) / edge_len
     I_e = (Jn_e + Jp_e) * mesh.facet_length  # A/cm, direction i -> j
 
-    i_is_contact = is_contact[ii] & ~is_contact[jj]
-    j_is_contact = is_contact[jj] & ~is_contact[ii]
+    # 2026-09-13: exclude any edge whose non-contact endpoint is an
+    # insulator node from this sum. Those edges' phin/phip on the oxide
+    # side are an arbitrary pinned placeholder (0), not a real potential
+    # (see newton_solver_qf_2d.py's is_oxide_free comments) - a contact
+    # sitting right at an oxide/mesa corner (as this project's first
+    # MOSFET geometry does) picks up one such edge whose "current" is
+    # driven entirely by that placeholder and the contact's own fixed
+    # bias, completely independent of Vgs. That single edge was found to
+    # account for ~99.995% of the entire off-state terminal current,
+    # flooring what should be an exponentially falling subthreshold
+    # diffusion current. This exclusion only changes THIS post-processing
+    # sum, not the Newton solver's own residual/Jacobian (those rows are
+    # already overwritten by the Dirichlet/oxide-pin logic regardless of
+    # this edge, so masking it here has no effect on convergence) - unlike
+    # the broader _semiconductor_edge_mask() masking tried and reverted in
+    # the solver itself, which changed real channel-surface nodes' own
+    # continuity equations and made Newton convergence far worse.
+    is_insulator = mesh.is_insulator if mesh.is_insulator is not None \
+        else np.zeros(N, dtype=bool)
+    i_is_contact = is_contact[ii] & ~is_contact[jj] & ~is_insulator[jj]
+    j_is_contact = is_contact[jj] & ~is_contact[ii] & ~is_insulator[ii]
     return float(np.sum(I_e[i_is_contact]) - np.sum(I_e[j_is_contact]))
 
 
