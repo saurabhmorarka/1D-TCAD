@@ -37,8 +37,26 @@ def contact_current(mesh, mat, result, contact_name):
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
     n_avg = 0.5 * (n[ii] + n[jj])
     p_avg = 0.5 * (p[ii] + p[jj])
-    Jn_e = -Q * mat.mu_n * n_avg * (phin[jj] - phin[ii]) / edge_len
-    Jp_e = -Q * mat.mu_p * p_avg * (phip[jj] - phip[ii]) / edge_len
+    # Must use the SAME per-edge mobility the solver's own residual
+    # assembly used (solver2d/newton_solver_qf_2d.py::_mesh_mobility_nodal)
+    # - a plain scalar mat.mu_n/mat.mu_p here would silently mismatch the
+    # doping-dependent mobility actually driving the converged (n,p,phin,
+    # phip) state, giving an inconsistent post-processed current.
+    from solver2d.newton_solver_qf_2d import _mesh_mobility_nodal
+    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
+    mu_n_e = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
+    mu_p_e = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
+    # 2026-09-13: the semiconductor/insulator no-flux edge mask
+    # (newton_solver_qf_2d.py::_semiconductor_edge_mask, still defined
+    # there for a later pass) is deliberately NOT applied here for now -
+    # kept consistent with the solver's own residual assembly, which backed
+    # this out too (see the matching comment there) because it made
+    # near-threshold/off-state convergence much slower across the whole
+    # sweep. Known consequence: the flat off-state "leakage" floor from the
+    # contact/oxide corner edge is back - tracked as a deferred issue, to
+    # be solved in the 1D diode first per the user's own direction.
+    Jn_e = -Q * mu_n_e * n_avg * (phin[jj] - phin[ii]) / edge_len
+    Jp_e = -Q * mu_p_e * p_avg * (phip[jj] - phip[ii]) / edge_len
     I_e = (Jn_e + Jp_e) * mesh.facet_length  # A/cm, direction i -> j
 
     i_is_contact = is_contact[ii] & ~is_contact[jj]

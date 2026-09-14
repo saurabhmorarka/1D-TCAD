@@ -49,8 +49,24 @@ def tag_boundary_points(points_cm, domain):
     the domain's outer boundary (a plain rectangle, or a rectangle with a
     mesa protrusion spliced in - see geometry2d.py's `boundary_point_role`;
     interior points, including the y=0 interface line under a mesa, are not
-    included)."""
+    included).
+
+    A contact match also requires the point's own y to match THIS
+    contact's actual y-plane (domain._contact_y - 0 for a bare top surface,
+    or a mesa's own -height for a contact on top of a mesa), not just the
+    point's role ("top"/"bottom"/"mesa_wall") and x-range: a mesa's own
+    vertical side wall shares its two endpoint x-coordinates with the flat
+    surface immediately beside it (e.g. a MOSFET's drain sits right next to
+    the gate's oxide, so the mesa's top-right corner and the mesa's wall-
+    bottom corner both fall at the same x as the drain contact's own left
+    edge) - without the y check, whichever contact happens to come first in
+    domain.contacts (by x-range alone) would silently steal the OTHER
+    contact's corner point, exactly the kind of one-node mistagging a
+    finite-difference/mesh-quality check wouldn't catch but a real solve
+    would (the "gate" node's Dirichlet BC would silently get overwritten by
+    "drain"'s ohmic one, or vice versa)."""
     tol_x = _EPS_REL * max(domain.width_cm, 1e-30)
+    tol_y = _EPS_REL * max(domain.height_cm, 1e-30)
 
     idx_list, tags = [], []
     for i, (xi, yi) in enumerate(points_cm):
@@ -58,14 +74,21 @@ def tag_boundary_points(points_cm, domain):
         if role is None:
             continue
         tag = None
-        if role in ("top", "bottom"):
+        if role in ("top", "bottom", "mesa_wall"):
             for contact in domain.contacts:
-                if contact.surface != role:
+                if contact.surface not in ("top", "bottom"):
+                    continue
+                if role == "bottom" and contact.surface != "bottom":
+                    continue
+                if role in ("top", "mesa_wall") and contact.surface != "top":
                     continue
                 x0, x1 = contact.x_range_cm
-                if x0 - tol_x <= xi <= x1 + tol_x:
-                    tag = f"contact:{contact.name}"
-                    break
+                if not (x0 - tol_x <= xi <= x1 + tol_x):
+                    continue
+                if abs(yi - domain._contact_y(contact)) > tol_y:
+                    continue
+                tag = f"contact:{contact.name}"
+                break
         if tag is None and role in ("left", "right"):
             tag = "symmetry"
         if tag is None:

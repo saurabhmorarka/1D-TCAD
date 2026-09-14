@@ -50,16 +50,131 @@ from core.solver import contact_values
 
 MAX_QF_STEP = 5.0
 
+# Regularization field scale (V/cm) for the Caughey-Thomas |E| -> smooth
+# even function of E: E_reg = sqrt(E^2 + E_SMOOTH^2). This is what makes
+# mu(E) (and hence d(mu)/dE) a well-defined, smooth function of E right at
+# E=0 - the literal |E|/E^beta forms have a kink or (for beta<1) a
+# diverging derivative there, which would poison the Jacobian at exactly
+# the equilibrium/near-flatband bias points this project starts every
+# Newton continuation from. 1 V/cm is ~4-7 orders of magnitude below any
+# physically meaningful field in this device (channel fields are
+# ~1e3-1e6 V/cm), so it is a pure numerical regularization, not a physics
+# approximation.
+E_SMOOTH = 1.0
+
 
 def unpack_qf(U, N):
     return U[:N], U[N:2 * N], U[2 * N:3 * N]
 
 
-def _densities(psi, phin, phip, mat: Material):
-    Vt = mat.Vt
-    n = mat.ni * np.exp((psi - phin) / Vt)
-    p = mat.ni * np.exp((phip - psi) / Vt)
+def mobility_doping(N_abs, mu_max, mu_min, N_ref, alpha):
+    """Caughey-Thomas DOPING-dependence low-field mobility (see
+    core/params.py's Material.mu_n_max/etc. docstring for the formula's
+    citation/parameter source):
+
+        mu(N) = mu_min + (mu_max - mu_min) / (1 + (N/N_ref)^alpha)
+
+    N_abs is the LOCAL TOTAL (ionized) doping magnitude, cm^-3 - the usual
+    convention for this model (not net doping, since even a compensated
+    region's mobility is degraded by both dopant species' scattering).
+    Depends ONLY on the fixed mesh doping array, never on the solved
+    psi/phin/phip, so (unlike the old field-dependent mobility_field())
+    this needs no Jacobian term of its own - it is exactly as simple as a
+    scalar constant mobility, just spatially varying."""
+    return mu_min + (mu_max - mu_min) / (1.0 + (N_abs / N_ref) ** alpha)
+
+
+def mobility_field(E, mu0, vsat, beta):
+    """Caughey-Thomas velocity-saturation mobility and its derivative
+    w.r.t. the (signed) driving field E:
+
+        mu(E) = mu0 / (1 + (mu0*|E|/vsat)^beta)^(1/beta)
+
+    |E| is replaced by the smooth even regularization sqrt(E^2+E_SMOOTH^2)
+    (see E_SMOOTH's docstring above) so mu and dmu_dE are both finite,
+    smooth functions of E everywhere including E=0 - required since E=0
+    is exactly where every Newton continuation in this project starts
+    (equilibrium/flatband). Returns (mu, dmu_dE), both arrays shaped like E.
+
+    Derived by direct differentiation of mu(E) treating x = mu0*Ereg/vsat:
+    mu = mu0*(1+x^beta)^(-1/beta), so
+    dmu/dEreg = -mu0*(mu0/vsat)*x^(beta-1)*(1+x^beta)^(-1/beta-1),
+    and dmu/dE = dmu/dEreg * dEreg/dE = dmu/dEreg * (E/Ereg).
+    Note beta_n=2 and beta_p=1 (this project's defaults, core/params.py)
+    both give x^(beta-1) with a non-negative integer exponent (x^1 or x^0),
+    so this derivative is itself finite and smooth at x=0 (E=0) even
+    without the E_SMOOTH regularization - E_SMOOTH is still kept for
+    robustness against any future non-default beta<1 choice.
+    """
+    Ereg = np.sqrt(E ** 2 + E_SMOOTH ** 2)
+    x = mu0 * Ereg / vsat
+    base = 1.0 + x ** beta
+    mu = mu0 * base ** (-1.0 / beta)
+    dmu_dEreg = -mu0 * (mu0 / vsat) * x ** (beta - 1.0) * base ** (-1.0 / beta - 1.0)
+    dmu_dE = dmu_dEreg * (E / Ereg)
+    return mu, dmu_dE
+
+
+def _densities(psi, phin, phip, ni_arr, Vt):
+    n = ni_arr * np.exp((psi - phin) / Vt)
+    p = ni_arr * np.exp((phip - psi) / Vt)
     return n, p
+
+
+def _mesh_mobility_nodal(mesh, mat):
+    """Static (solve-independent) per-NODE doping-dependent mobility
+    arrays, following the same precomputed-array pattern as
+    _mesh_ni_edge_g's ni_arr/edge_g below (mesh.Cdop is always populated,
+    homogeneous mesh or not, so - unlike ni_arr - this needs no
+    homogeneous-mesh fallback branch)."""
+    N_abs = np.abs(mesh.Cdop)
+    mu_n_node = mobility_doping(N_abs, mat.mu_n_max, mat.mu_n_min, mat.N_ref_n, mat.alpha_n)
+    mu_p_node = mobility_doping(N_abs, mat.mu_p_max, mat.mu_p_min, mat.N_ref_p, mat.alpha_p)
+    return mu_n_node, mu_p_node
+
+
+def _semiconductor_edge_mask(mesh):
+    """Boolean (E,) mask, True on edges where BOTH endpoints are real
+    semiconductor (not insulator/oxide) - the physically correct no-flux
+    BC at a semiconductor/insulator interface (Jn.n_hat = Jp.n_hat = 0
+    there, current is confined to the semiconductor). Found (2026-09-13,
+    jointly - see this module's mobility-doping-model commit and the
+    matching root-cause writeup) to be a genuine, previously-undiagnosed
+    discretization bug when missing: an edge with one endpoint a real
+    semiconductor node (nonzero n or p) and the other an is_oxide_free
+    insulator node (pinned phin=phip=0 - an ARBITRARY placeholder, not a
+    real potential) computes a nonzero Jn_e/Jp_e driven by that arbitrary
+    pinned value, using n_avg=0.5*(n_real+0) (still nonzero since only the
+    OXIDE side's density is zero). The is_oxide_free row-pinning logic
+    below only stops that node's OWN row from being assembled via the
+    normal continuity equation - it does nothing to stop this edge's
+    current from still being added into the ADJACENT semiconductor (or
+    even CONTACT) node's row, so it silently leaks a spurious current with
+    no governing conservation law. Confirmed empirically at a real MOSFET
+    off-state bias point: 99.995% of the entire (spurious) drain current
+    came from a single such edge at the corner where the drain contact
+    meets the gate-oxide/mesa wall, tracking the DRAIN's own fixed
+    Dirichlet BC (hence flat vs. Vgs) and completely independent of
+    substrate doping (hence flat vs. a 1e16->1e18 doping sweep) - exactly
+    the two symptoms flagged (but never root-caused) in earlier sessions.
+    Returns an all-True mask (no insulator anywhere) for a homogeneous
+    mesh (mesh.is_insulator is None, e.g. the plain diode)."""
+    if mesh.is_insulator is None:
+        return np.ones(len(mesh.edges), dtype=bool)
+    ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
+    return ~(mesh.is_insulator[ii] | mesh.is_insulator[jj])
+
+
+def _mesh_ni_edge_g(mesh, mat):
+    """A homogeneous-silicon mesh (the diode) has mesh.ni_arr/edge_g unset
+    (mesh2d.build_mesh2d only populates them when built with mat= given -
+    see that module's docstring); a heterogeneous mesh (a MOSFET or MOS
+    capacitor, with an oxide region) has them populated. Falling back to
+    mat.ni (scalar broadcast) / mat.eps*mesh.edge_weight here means this
+    solver works unchanged for both kinds of mesh."""
+    ni_arr = mesh.ni_arr if mesh.ni_arr is not None else np.full(len(mesh.points), mat.ni)
+    g_e = mesh.edge_g if mesh.edge_g is not None else mat.eps * mesh.edge_weight
+    return ni_arr, g_e
 
 
 def poisson_row_scale(mat: Material, h_typ: float) -> float:
@@ -87,19 +202,40 @@ def continuity_row_scale(mat: Material, h_typ: float) -> float:
 def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale, cont_scale):
     N = len(mesh.points)
     psi, phin, phip = unpack_qf(U, N)
-    n, p = _densities(psi, phin, phip, mat)
-    Vt, ni = mat.Vt, mat.ni
+    ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
+    n, p = _densities(psi, phin, phip, ni_arr, mat.Vt)
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
-    g_e = mat.eps * mesh.edge_weight
 
     n_avg = 0.5 * (n[ii] + n[jj])
     p_avg = 0.5 * (p[ii] + p[jj])
-    Jn_e = -Q * mat.mu_n * n_avg * (phin[jj] - phin[ii]) / edge_len
-    Jp_e = -Q * mat.mu_p * p_avg * (phip[jj] - phip[ii]) / edge_len
+    # Doping-dependent (NOT field-dependent) mobility: static per-node
+    # arrays averaged to an edge value, same convention as n_avg/p_avg
+    # above - see mobility_doping()'s docstring. The field-dependent
+    # (velocity-saturation) Caughey-Thomas model that used to sit here
+    # (mobility_field(), still defined above for future use) is
+    # deliberately NOT used in this active solve path for now (2026-09-13:
+    # it was making the MOSFET Ids-Vgs transfer curve worse, not better -
+    # collapsing at high Vgs instead of gracefully rolling off - so it was
+    # backed out pending its own separate debugging pass).
+    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
+    mu_n_e = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
+    mu_p_e = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
+    Jn_e = -Q * mu_n_e * n_avg * (phin[jj] - phin[ii]) / edge_len
+    Jp_e = -Q * mu_p_e * p_avg * (phip[jj] - phip[ii]) / edge_len
     In_e = Jn_e * mesh.facet_length
     Ip_e = Jp_e * mesh.facet_length
+    # 2026-09-13: the semiconductor/insulator no-flux edge mask
+    # (_semiconductor_edge_mask(), still defined above for a later pass) is
+    # deliberately NOT applied here for now - it is physically correct (see
+    # its own docstring) but made near-threshold/off-state Newton
+    # continuation dramatically slower and less robust across the whole
+    # sweep, not just the corner it targeted. Backed out so the on-state
+    # curve stays fast and clean; the known consequence is the flat
+    # off-state "leakage" floor from the contact/oxide corner edge is back
+    # (tracked as a known, deferred issue - to be solved in the 1D diode
+    # first per the user's own direction, then reapplied here).
 
     div_psi = np.zeros(N)
     np.add.at(div_psi, ii, g_e * (psi[jj] - psi[ii]))
@@ -113,12 +249,32 @@ def _residual(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc, poisson_scale,
     np.add.at(div_p, ii, Ip_e)
     np.add.at(div_p, jj, -Ip_e)
 
-    denom = mat.tau_p * (n + ni) + mat.tau_n * (p + ni)
-    R = (n * p - ni ** 2) / denom
+    # SRH denom is exactly 0 at an insulator node (n=p=ni_arr=0 there,
+    # since ni_arr=0 makes _densities return 0 regardless of psi/phin/phip)
+    # - guard the divide rather than let it raise/NaN; R is physically
+    # moot there anyway (no recombination in an insulator).
+    denom = mat.tau_p * (n + ni_arr) + mat.tau_n * (p + ni_arr)
+    denom_safe = np.where(denom > 0.0, denom, 1.0)
+    R = np.where(denom > 0.0, (n * p - ni_arr ** 2) / denom_safe, 0.0)
 
     Rpsi = (div_psi / mesh.cv_area - Q * (n - p - mesh.Cdop)) / poisson_scale
     Rn = (div_n / mesh.cv_area - Q * R) / cont_scale
     Rp = (div_p / mesh.cv_area + Q * R) / cont_scale
+
+    # phin/phip have NO governing equation at a non-contact insulator node
+    # (n=p=0 there regardless of their value, since ni_arr=0 - there is no
+    # current, no recombination, nothing for a continuity equation to
+    # balance). Left alone, that makes the corresponding Jacobian row
+    # either identically zero (an interior oxide node with only other
+    # oxide neighbors - an exactly singular row) or driven by a spurious
+    # "current" from a real semiconductor neighbor that has no physical
+    # meaning (a node one layer into the oxide from the interface). Pin
+    # both to 0 (arbitrary but harmless, exactly mirroring how a Dirichlet
+    # contact row is overwritten below) at every such node instead.
+    is_oxide_free = mesh.is_insulator & ~is_contact if mesh.is_insulator is not None \
+        else np.zeros(N, dtype=bool)
+    Rn = np.where(is_oxide_free, phin, Rn)
+    Rp = np.where(is_oxide_free, phip, Rp)
 
     Rpsi[is_contact] = psi[is_contact] - psi_bc
     Rn[is_contact] = phin[is_contact] - phin_bc
@@ -131,19 +287,33 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
                             poisson_scale, cont_scale):
     N = len(mesh.points)
     psi, phin, phip = unpack_qf(U, N)
-    n, p = _densities(psi, phin, phip, mat)
-    Vt, ni = mat.Vt, mat.ni
+    ni_arr, g_e = _mesh_ni_edge_g(mesh, mat)
+    Vt = mat.Vt
+    n, p = _densities(psi, phin, phip, ni_arr, Vt)
 
     ii, jj = mesh.edges[:, 0], mesh.edges[:, 1]
     edge_len = np.linalg.norm(mesh.points[jj] - mesh.points[ii], axis=1)
-    g_e = mat.eps * mesh.edge_weight
 
     n_avg = 0.5 * (n[ii] + n[jj])
     p_avg = 0.5 * (p[ii] + p[jj])
     dphin_e = phin[jj] - phin[ii]
     dphip_e = phip[jj] - phip[ii]
-    Jn_e = -Q * mat.mu_n * n_avg * dphin_e / edge_len
-    Jp_e = -Q * mat.mu_p * p_avg * dphip_e / edge_len
+
+    # Doping-dependent (NOT field-dependent) mobility - see the matching
+    # comment in _residual() above for why the field-dependent
+    # (Caughey-Thomas velocity-saturation) model was backed out of this
+    # active path. Depends only on the fixed mesh.Cdop array, so it needs
+    # NO Jacobian term of its own (no dmu/dpsi contribution below) -
+    # mu_n_e/mu_p_e here are plain constants as far as Newton's linearization
+    # is concerned, exactly like the original scalar mat.mu_n/mat.mu_p case.
+    mu_n_node, mu_p_node = _mesh_mobility_nodal(mesh, mat)
+    mu_n_e = 0.5 * (mu_n_node[ii] + mu_n_node[jj])
+    mu_p_e = 0.5 * (mu_p_node[ii] + mu_p_node[jj])
+    # 2026-09-13: semiconductor/insulator no-flux edge masking backed out
+    # here too - see the matching comment in _residual() above.
+
+    Jn_e = -Q * mu_n_e * n_avg * dphin_e / edge_len
+    Jp_e = -Q * mu_p_e * p_avg * dphip_e / edge_len
     In_e = Jn_e * mesh.facet_length
     Ip_e = Jp_e * mesh.facet_length
 
@@ -157,13 +327,30 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     np.add.at(div_p, ii, Ip_e)
     np.add.at(div_p, jj, -Ip_e)
 
-    denom = mat.tau_p * (n + ni) + mat.tau_n * (p + ni)
-    num = n * p - ni ** 2
-    R = num / denom
+    # SRH denom is exactly 0 at an insulator node (n=p=ni_arr=0 there) -
+    # guard the divide; R and its derivatives are physically moot there
+    # (no recombination in an insulator) and must not propagate a NaN into
+    # the rest of the (otherwise perfectly well-posed) linear system.
+    denom = mat.tau_p * (n + ni_arr) + mat.tau_n * (p + ni_arr)
+    denom_safe = np.where(denom > 0.0, denom, 1.0)
+    num = n * p - ni_arr ** 2
+    R = np.where(denom > 0.0, num / denom_safe, 0.0)
 
     Rpsi = (div_psi / mesh.cv_area - Q * (n - p - mesh.Cdop)) / poisson_scale
     Rn = (div_n / mesh.cv_area - Q * R) / cont_scale
     Rp = (div_p / mesh.cv_area + Q * R) / cont_scale
+
+    # See _residual()'s matching comment: phin/phip are pinned to 0 (not
+    # solved via the normal continuity equation) at every non-contact
+    # insulator node - otherwise either an exactly-singular all-zero
+    # Jacobian row (an interior oxide node with only other oxide
+    # neighbors) or a spurious coupling to a real semiconductor neighbor's
+    # phin/phip with no physical basis.
+    is_oxide_free = mesh.is_insulator & ~is_contact if mesh.is_insulator is not None \
+        else np.zeros(N, dtype=bool)
+    Rn = np.where(is_oxide_free, phin, Rn)
+    Rp = np.where(is_oxide_free, phip, Rp)
+
     Rpsi[is_contact] = psi[is_contact] - psi_bc
     Rn[is_contact] = phin[is_contact] - phin_bc
     Rp[is_contact] = phip[is_contact] - phip_bc
@@ -173,21 +360,32 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     dn_dphin = -n / Vt
     dp_dpsi = -p / Vt
     dp_dphip = p / Vt
-    dR_dn = (p * denom - num * mat.tau_p) / denom ** 2
-    dR_dp = (n * denom - num * mat.tau_n) / denom ** 2
+    dR_dn = np.where(denom > 0.0, (p * denom - num * mat.tau_p) / denom_safe ** 2, 0.0)
+    dR_dp = np.where(denom > 0.0, (n * denom - num * mat.tau_n) / denom_safe ** 2, 0.0)
 
-    cn_e = Q * mat.mu_n * mesh.facet_length / edge_len
-    cp_e = Q * mat.mu_p * mesh.facet_length / edge_len
+    # base_{n,p}_e are the mobility-FREE prefactors (Q*facet_length/edge_len);
+    # cn_e/cp_e fold in the (now doping-dependent, psi-INDEPENDENT) mu_n_e/
+    # mu_p_e per edge.
+    base_n_e = Q * mesh.facet_length / edge_len
+    base_p_e = Q * mesh.facet_length / edge_len
+    cn_e = mu_n_e * base_n_e
+    cp_e = mu_p_e * base_p_e
 
-    dIn_dpsi_i = -cn_e * (dn_dpsi[ii] / 2.0) * dphin_e
-    dIn_dpsi_j = -cn_e * (dn_dpsi[jj] / 2.0) * dphin_e
+    # dphin/dphip derivatives - identical in form to the original constant-
+    # mobility case (mu depends only on fixed doping, not phin/phip).
     dIn_dphin_i = -cn_e * ((dn_dphin[ii] / 2.0) * dphin_e - n_avg)
     dIn_dphin_j = -cn_e * ((dn_dphin[jj] / 2.0) * dphin_e + n_avg)
-
-    dIp_dpsi_i = -cp_e * (dp_dpsi[ii] / 2.0) * dphip_e
-    dIp_dpsi_j = -cp_e * (dp_dpsi[jj] / 2.0) * dphip_e
     dIp_dphip_i = -cp_e * ((dp_dphip[ii] / 2.0) * dphip_e - p_avg)
     dIp_dphip_j = -cp_e * ((dp_dphip[jj] / 2.0) * dphip_e + p_avg)
+
+    # dpsi derivatives: back to the SINGLE contribution from n_avg/p_avg's
+    # own psi dependence (mu is fixed w.r.t. psi now, so there is no
+    # product-rule mobility term here anymore - see this module's Task-1
+    # backout comment near mu_n_e/mu_p_e's definition above).
+    dIn_dpsi_i = -cn_e * (dn_dpsi[ii] / 2.0) * dphin_e
+    dIn_dpsi_j = -cn_e * (dn_dpsi[jj] / 2.0) * dphin_e
+    dIp_dpsi_i = -cp_e * (dp_dpsi[ii] / 2.0) * dphip_e
+    dIp_dpsi_j = -cp_e * (dp_dpsi[jj] / 2.0) * dphip_e
 
     rows_list, cols_list, data_list = [], [], []
 
@@ -200,6 +398,12 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     active_i = ~is_contact[ii]
     active_j = ~is_contact[jj]
     cv_i, cv_j = mesh.cv_area[ii], mesh.cv_area[jj]
+
+    # Electron/hole continuity rows additionally exclude is_oxide_free
+    # nodes (pinned to phin=0/phip=0 above, not assembled normally here).
+    is_np_fixed = is_contact | is_oxide_free
+    cont_active_i = ~is_np_fixed[ii]
+    cont_active_j = ~is_np_fixed[jj]
 
     add(ii[active_i], ii[active_i], (-g_e / cv_i / poisson_scale)[active_i])
     add(ii[active_i], jj[active_i], (g_e / cv_i / poisson_scale)[active_i])
@@ -216,39 +420,48 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
 
     # --- Electron continuity: per-edge current derivative ---
     r_n_i, r_n_j = N + ii, N + jj
-    add(r_n_i[active_i], ii[active_i], (dIn_dpsi_i / cv_i / cont_scale)[active_i])
-    add(r_n_i[active_i], jj[active_i], (dIn_dpsi_j / cv_i / cont_scale)[active_i])
-    add(r_n_i[active_i], N + ii[active_i], (dIn_dphin_i / cv_i / cont_scale)[active_i])
-    add(r_n_i[active_i], N + jj[active_i], (dIn_dphin_j / cv_i / cont_scale)[active_i])
+    add(r_n_i[cont_active_i], ii[cont_active_i], (dIn_dpsi_i / cv_i / cont_scale)[cont_active_i])
+    add(r_n_i[cont_active_i], jj[cont_active_i], (dIn_dpsi_j / cv_i / cont_scale)[cont_active_i])
+    add(r_n_i[cont_active_i], N + ii[cont_active_i], (dIn_dphin_i / cv_i / cont_scale)[cont_active_i])
+    add(r_n_i[cont_active_i], N + jj[cont_active_i], (dIn_dphin_j / cv_i / cont_scale)[cont_active_i])
 
-    add(r_n_j[active_j], ii[active_j], (-dIn_dpsi_i / cv_j / cont_scale)[active_j])
-    add(r_n_j[active_j], jj[active_j], (-dIn_dpsi_j / cv_j / cont_scale)[active_j])
-    add(r_n_j[active_j], N + ii[active_j], (-dIn_dphin_i / cv_j / cont_scale)[active_j])
-    add(r_n_j[active_j], N + jj[active_j], (-dIn_dphin_j / cv_j / cont_scale)[active_j])
+    add(r_n_j[cont_active_j], ii[cont_active_j], (-dIn_dpsi_i / cv_j / cont_scale)[cont_active_j])
+    add(r_n_j[cont_active_j], jj[cont_active_j], (-dIn_dpsi_j / cv_j / cont_scale)[cont_active_j])
+    add(r_n_j[cont_active_j], N + ii[cont_active_j], (-dIn_dphin_i / cv_j / cont_scale)[cont_active_j])
+    add(r_n_j[cont_active_j], N + jj[cont_active_j], (-dIn_dphin_j / cv_j / cont_scale)[cont_active_j])
 
     # --- Electron continuity: per-node recombination derivative ---
-    r_n_free = N + free
-    add(r_n_free, free, -Q * (dR_dn[free] * dn_dpsi[free] + dR_dp[free] * dp_dpsi[free]) / cont_scale)
-    add(r_n_free, N + free, -Q * dR_dn[free] * dn_dphin[free] / cont_scale)
-    add(r_n_free, 2 * N + free, -Q * dR_dp[free] * dp_dphip[free] / cont_scale)
+    free_np = node[~is_np_fixed]
+    r_n_free = N + free_np
+    add(r_n_free, free_np, -Q * (dR_dn[free_np] * dn_dpsi[free_np] + dR_dp[free_np] * dp_dpsi[free_np]) / cont_scale)
+    add(r_n_free, N + free_np, -Q * dR_dn[free_np] * dn_dphin[free_np] / cont_scale)
+    add(r_n_free, 2 * N + free_np, -Q * dR_dp[free_np] * dp_dphip[free_np] / cont_scale)
 
     # --- Hole continuity: per-edge current derivative ---
     r_p_i, r_p_j = 2 * N + ii, 2 * N + jj
-    add(r_p_i[active_i], ii[active_i], (dIp_dpsi_i / cv_i / cont_scale)[active_i])
-    add(r_p_i[active_i], jj[active_i], (dIp_dpsi_j / cv_i / cont_scale)[active_i])
-    add(r_p_i[active_i], 2 * N + ii[active_i], (dIp_dphip_i / cv_i / cont_scale)[active_i])
-    add(r_p_i[active_i], 2 * N + jj[active_i], (dIp_dphip_j / cv_i / cont_scale)[active_i])
+    add(r_p_i[cont_active_i], ii[cont_active_i], (dIp_dpsi_i / cv_i / cont_scale)[cont_active_i])
+    add(r_p_i[cont_active_i], jj[cont_active_i], (dIp_dpsi_j / cv_i / cont_scale)[cont_active_i])
+    add(r_p_i[cont_active_i], 2 * N + ii[cont_active_i], (dIp_dphip_i / cv_i / cont_scale)[cont_active_i])
+    add(r_p_i[cont_active_i], 2 * N + jj[cont_active_i], (dIp_dphip_j / cv_i / cont_scale)[cont_active_i])
 
-    add(r_p_j[active_j], ii[active_j], (-dIp_dpsi_i / cv_j / cont_scale)[active_j])
-    add(r_p_j[active_j], jj[active_j], (-dIp_dpsi_j / cv_j / cont_scale)[active_j])
-    add(r_p_j[active_j], 2 * N + ii[active_j], (-dIp_dphip_i / cv_j / cont_scale)[active_j])
-    add(r_p_j[active_j], 2 * N + jj[active_j], (-dIp_dphip_j / cv_j / cont_scale)[active_j])
+    add(r_p_j[cont_active_j], ii[cont_active_j], (-dIp_dpsi_i / cv_j / cont_scale)[cont_active_j])
+    add(r_p_j[cont_active_j], jj[cont_active_j], (-dIp_dpsi_j / cv_j / cont_scale)[cont_active_j])
+    add(r_p_j[cont_active_j], 2 * N + ii[cont_active_j], (-dIp_dphip_i / cv_j / cont_scale)[cont_active_j])
+    add(r_p_j[cont_active_j], 2 * N + jj[cont_active_j], (-dIp_dphip_j / cv_j / cont_scale)[cont_active_j])
 
     # --- Hole continuity: per-node recombination derivative ---
-    r_p_free = 2 * N + free
-    add(r_p_free, free, Q * (dR_dn[free] * dn_dpsi[free] + dR_dp[free] * dp_dpsi[free]) / cont_scale)
-    add(r_p_free, N + free, Q * dR_dn[free] * dn_dphin[free] / cont_scale)
-    add(r_p_free, 2 * N + free, Q * dR_dp[free] * dp_dphip[free] / cont_scale)
+    r_p_free = 2 * N + free_np
+    add(r_p_free, free_np, Q * (dR_dn[free_np] * dn_dpsi[free_np] + dR_dp[free_np] * dp_dpsi[free_np]) / cont_scale)
+    add(r_p_free, N + free_np, Q * dR_dn[free_np] * dn_dphin[free_np] / cont_scale)
+    add(r_p_free, 2 * N + free_np, Q * dR_dp[free_np] * dp_dphip[free_np] / cont_scale)
+
+    # --- phin/phip identity-pinning rows at non-contact insulator nodes
+    # (see the matching Rn/Rp override above) - these rows have NO other
+    # contribution (excluded from every block above via is_np_fixed), so a
+    # plain diagonal 1 is exact, not just a pivoting safety net. ---
+    oxide_free_idx = node[is_oxide_free]
+    add(N + oxide_free_idx, N + oxide_free_idx, np.ones(len(oxide_free_idx)))
+    add(2 * N + oxide_free_idx, 2 * N + oxide_free_idx, np.ones(len(oxide_free_idx)))
 
     interior_rows = np.concatenate(rows_list)
     interior_cols = np.concatenate(cols_list)
@@ -274,12 +487,26 @@ def _residual_and_jacobian(U, mesh, mat, is_contact, psi_bc, phin_bc, phip_bc,
     return F, J
 
 
-def newton_solve_2d(mesh, mat: Material, Va, contact_bias_role, f_tol=1e-9, maxiter=50, verbose=False,
-                     psi_init=None, phin_init=None, phip_init=None):
-    """Solve the 2D QF system at applied bias Va (V), applied to whichever
-    contact(s) have bias_role="anode" (bias_role="cathode" contacts stay at
-    0V - see mesh2d/geometry2d.py::Contact). Returns a dict matching
-    core/newton_solver_qf.py's shape (psi, n, p, phin, phip, iters).
+def newton_solve_2d(mesh, mat: Material, bias_by_contact, f_tol=1e-9, maxiter=50, verbose=False,
+                     psi_init=None, phin_init=None, phip_init=None,
+                     psi_bc_override=None, phin_bc_override=None, phip_bc_override=None):
+    """Solve the 2D QF system with each contact held at the voltage given
+    in `bias_by_contact` ({contact_name: volts} - any contact not listed
+    defaults to 0V). Returns a dict matching core/newton_solver_qf.py's
+    shape (psi, n, p, phin, phip, iters).
+
+    This assumes every contact is an ideal OHMIC contact on real
+    semiconductor (mass-action/charge-neutrality BC via contact_values) by
+    default - correct for a diode's anode/cathode or a MOSFET's source/
+    drain/body, but WRONG for an ideal-metal gate sitting on an insulator
+    (see solver2d/poisson2d_mos.py's own gate BC: psi_bulk + (VG-V_FB), not
+    an ohmic relation, which is meaningless where ni=0 anyway). For any
+    such contact, pass its already-computed Dirichlet value(s) via
+    `psi_bc_override`/`phin_bc_override`/`phip_bc_override`
+    ({contact_name: value}) to bypass the ohmic-BC computation entirely for
+    that contact - the driver (e.g. main2d_mosfet_sweep.py) is expected to
+    compute the gate's psi_bc itself (mos.mos_analytic.flatband_voltage,
+    same as the MOS capacitor) and pass it through here.
 
     psi_init/phin_init/phip_init, if given, warm-start Newton from a
     previous bias point's converged solution (see main2d_sweep.py) instead
@@ -292,7 +519,11 @@ def newton_solve_2d(mesh, mat: Material, Va, contact_bias_role, f_tol=1e-9, maxi
     piece of core/newton_solver_qf.py's fuller Gummel-restart robustness
     layer ported here - a full 2D Gummel solver is still deferred)."""
     N = len(mesh.points)
-    Vt, ni = mat.Vt, mat.ni
+    Vt = mat.Vt
+    ni_arr, _ = _mesh_ni_edge_g(mesh, mat)
+    psi_bc_override = psi_bc_override or {}
+    phin_bc_override = phin_bc_override or {}
+    phip_bc_override = phip_bc_override or {}
 
     boundary_bc_type = np.array(mesh.boundary_bc_type)
     is_contact_boundary = np.array([bc.startswith("contact:") for bc in boundary_bc_type])
@@ -302,19 +533,31 @@ def newton_solve_2d(mesh, mat: Material, Va, contact_bias_role, f_tol=1e-9, maxi
     is_contact_full = np.zeros(N, dtype=bool)
     is_contact_full[contact_point_idx] = True
 
-    psi_eq = equilibrium_bulk_potential_arr(Vt, np.full(N, ni), mesh.Cdop)
-
-    bias_of = {c.name: (Va if c.bias_role == contact_bias_role else 0.0) for c in mesh.domain.contacts}
+    # ni_arr is 0 at an insulator node (mesh.is_insulator), which would
+    # divide-by-zero into a NaN "equilibrium potential" there (moot anyway,
+    # since that node is never a free/non-contact unknown in the physics
+    # sense - it's either a Dirichlet override, e.g. a gate on oxide, or an
+    # interior insulator node with no equilibrium relation to speak of).
+    # Substitute a safe placeholder ni there so this stays finite and
+    # doesn't poison the cold-start guess with a NaN.
+    is_insulator = mesh.is_insulator if mesh.is_insulator is not None else np.zeros(N, dtype=bool)
+    ni_safe_eq = np.where(is_insulator, 1.0, ni_arr)
+    psi_eq = np.where(is_insulator, 0.0, equilibrium_bulk_potential_arr(Vt, ni_safe_eq, mesh.Cdop))
 
     psi_bc = np.empty(len(contact_point_idx))
     phin_bc = np.empty(len(contact_point_idx))
     phip_bc = np.empty(len(contact_point_idx))
     for k, (pt, name) in enumerate(zip(contact_point_idx, contact_names)):
-        n_bc, p_bc = contact_values(mat, mesh.Cdop[pt], ni=ni)
-        v_applied = bias_of[name]
-        psi_bc[k] = psi_eq[pt] + v_applied
-        phin_bc[k] = psi_bc[k] - Vt * np.log(n_bc / ni)
-        phip_bc[k] = psi_bc[k] + Vt * np.log(p_bc / ni)
+        v_applied = bias_by_contact.get(name, 0.0)
+        if name in psi_bc_override:
+            psi_bc[k] = psi_bc_override[name]
+            phin_bc[k] = phin_bc_override[name]
+            phip_bc[k] = phip_bc_override[name]
+        else:
+            n_bc, p_bc = contact_values(mat, mesh.Cdop[pt], ni=ni_arr[pt])
+            psi_bc[k] = psi_eq[pt] + v_applied
+            phin_bc[k] = psi_bc[k] - Vt * np.log(n_bc / ni_arr[pt])
+            phip_bc[k] = psi_bc[k] + Vt * np.log(p_bc / ni_arr[pt])
 
     def _cold_start():
         # phin0=phip0=0 EXACTLY everywhere (the natural equilibrium guess)
@@ -409,10 +652,10 @@ def newton_solve_2d(mesh, mat: Material, Va, contact_bias_role, f_tol=1e-9, maxi
 
     if res_norm > 1.0:
         warnings.warn(
-            f"Newton(QF,2D) solve did not converge at Va={Va} V "
+            f"Newton(QF,2D) solve did not converge at bias_by_contact={bias_by_contact} "
             f"(|F|_inf={res_norm:.3e} at iteration {it}) even after a cold-start retry.")
 
     psi, phin, phip = unpack_qf(U, N)
-    n, p = _densities(psi, phin, phip, mat)
+    n, p = _densities(psi, phin, phip, ni_arr, Vt)
     return {"psi": psi, "n": n, "p": p, "phin": phin, "phip": phip,
             "iters": it, "res_norm": res_norm}
