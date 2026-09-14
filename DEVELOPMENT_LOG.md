@@ -3322,3 +3322,56 @@ deferred to a 1D-diode prototyping pass first, per explicit user
 direction); DIBL, subthreshold-swing degradation, and other short-channel
 effects the user's eventual goal is to study (blocked on the above two
 items landing first).
+
+## 28. Session 18: the MOSFET flat-off-state bug actually fixed - a much
+narrower fix than the one backed out in session 17
+
+Session 17 root-caused the flat Ids-Vgs off-state floor to a single
+spurious mesh edge (drain contact -> the oxide node at the corner where
+the drain meets the gate-oxide/mesa wall, whose phin/phip are an
+arbitrary pinned-to-0 placeholder) but its fix attempt
+(`_semiconductor_edge_mask()`, excluding every edge with an insulator
+endpoint from the Newton solver's own residual/Jacobian assembly) made
+near-threshold convergence far worse across the whole sweep and was
+reverted, deferred pending a 1D-diode prototyping pass on the diffusion/
+leakage current model itself (since done - see the extreme-doping
+convergence session - and confirmed to already be intrinsic to this
+project's quasi-Fermi Newton formulation everywhere, 1D or 2D).
+
+Re-examining with that formulation confirmed working: the diffusion
+current itself was never missing from the 2D MOSFET solve - the
+quasi-Fermi `Jn = -q*mu_n*n*grad(phin)` flux already carries it on every
+edge, channel included. The bug is narrower than session 17's fix
+targeted. The spurious edge's contribution to the Newton residual/
+Jacobian is already inert: BOTH its endpoints' rows get overwritten
+regardless (the contact node by its Dirichlet BC, the oxide node by the
+`is_oxide_free` pin) - masking it in the solver's own equations, as
+session 17 tried, therefore couldn't fix anything there and instead broke
+something unrelated: it also silently changed real, non-contact
+channel-surface nodes' own continuity equations (removing what had been
+an accidental, convergence-stabilizing leak-to-zero sink term at every
+Si/SiO2 interface node under the gate), which is what actually caused the
+broad near-threshold slowdown - a much bigger change than the one corner
+edge it was meant to target.
+
+The spurious edge only actually matters in ONE place: `solver2d/
+current.py::contact_current()`'s post-processing terminal-current sum,
+which independently walks every edge touching a contact node and would
+of course still pick up this one. Fixed there only - excluded any
+contact-adjacent edge whose OTHER endpoint is an insulator node from the
+sum - touching zero Newton solver code. Verified on the shipped
+`configs/input_mosfet_2d.yaml` Ids-Vgs transfer sweep: all 26 points still
+converge (~81s total, matching session 17's ~80s baseline exactly - zero
+convergence impact, as expected since the residual/Jacobian are
+untouched), and the off-state floor is now a clean exponential
+(consistently ~2.3-2.4x per 100mV of Vgs, i.e. roughly a decade per
+~250mV) from Vgs=-0.5V up through threshold, rolling over into the
+existing clean on-state curve above it - the real, previously-swamped
+diffusion-current subthreshold signature.
+
+Not done this session: reapplying any equivalent fix to the MOS
+capacitor's own current path (`main2d_mos_sweep.py`) if it turns out to
+share the same contact/oxide-corner geometry issue (not yet checked, and
+that example is deliberately Poisson-only/no channel current by design,
+so may not be affected); the deferred velocity-saturation Ids-Vds work;
+DIBL/short-channel effects.
