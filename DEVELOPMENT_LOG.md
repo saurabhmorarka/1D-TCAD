@@ -3198,3 +3198,127 @@ around -1.1 MV/cm right at the oxide/silicon interface at VG=-1V
 C-V; a YAML config surface for `interface_segments` in the diode driver
 (still open from earlier); PETSc/iterative-solver adoption (still
 deliberately deferred).
+
+## 27. Session 17: first 2D planar NMOS - source/drain regions, doping-
+dependent mobility, and a found-but-deferred subthreshold current bug
+
+Built the first 2D planar NMOS transistor (`configs/input_mosfet_2d.yaml`,
+`main2d_mosfet_sweep.py`): the same oxide/gate stack as the MOS capacitor,
+now with n+ source/drain regions (1e20 cm^-3) each wired to their own
+ohmic contact, over a p-type substrate (1e16 cm^-3), a short (~0.5um)
+channel per an explicit user choice to scale toward a realistic short-
+channel device rather than mirror the MOS-cap/diode's larger scale. Unlike
+the MOS capacitor (deliberately Poisson-only, no channel current by
+design), a MOSFET's channel current requires the SAME fully-coupled
+Poisson+continuity solver the 2D diode already uses
+(`solver2d/newton_solver_qf_2d.py`), generalized here to a heterogeneous
+(oxide+semiconductor) mesh: a heterogeneous-permittivity `mesh.edge_g`/
+per-node `mesh.ni_arr`, phin/phip pinned to 0 (arbitrary, physically
+harmless placeholder) at every non-contact insulator node since ni=0 gives
+those unknowns no governing equation there, and an explicit
+`bias_by_contact` dict (replacing the diode's older single-Va-plus-role
+convention) since a MOSFET sweeps up to four independently biased
+terminals across two different sweep types (Ids-Vgs transfer, Ids-Vds
+output).
+
+**Chain of geometry/meshing/tagging bugs**, none exercised by the earlier
+diode/MOS-cap examples since this was the first device with source/drain
+regions flush against the domain's own edges and adjacent to a mesa: a
+segfault in the `triangle` C library from duplicate/overlapping PSLG
+segments (fixed by testing each candidate mesh-domain side's MIDPOINT, not
+endpoints - endpoints gave false positives at a mesa's own corners -
+against the domain's boundary role before adding it, in
+`mesh2d/pointcloud.py::_domain_pslg`); a `contact_values`-on-ni=0` NaN
+traced to the mesa's own top-right/wall-bottom corners being mistagged
+(they share an x-coordinate with the adjacent drain contact but sit at a
+different y-plane) - fixed by adding a y-match check
+(`mesh2d/boundary.py::tag_boundary_points`, via `domain._contact_y`) and
+extending eligible boundary roles to include `mesa_wall`; and a plain
+Python `OverflowError` in `_target_spacing`'s `growth**exponent` for a very
+small `h_min` relative to the domain, fixed by capping the exponent before
+the power. Also fixed a longstanding one-off bug in
+`mesh2d/geometry2d.py::Domain2D.material_props_at`: the oxide region's
+semiconductor-facing boundary line was resolving to the insulator
+(ni=0) instead of the semiconductor, using an inclusive `<=` where a
+strict `<` was needed - verified via the MOS capacitor's own C-V re-run,
+whose accumulation/inversion plateau improved from ~0.89x to ~1.0x Cox.
+
+**Convergence**: a monotonic sweep starting cold at one extreme bias
+reliably stalled a few hundred mV/mV in (a large, stuck-looking but not
+actually diverging Newton trajectory). Fixed the same way the diode's own
+sweep already does it: anchor at the gentlest bias point (Vgs=0 or Vds=0)
+and warm-start outward in both directions in small steps
+(`main2d_mosfet_sweep.py::sweep_vgs`/`sweep_vds`), with `sweep_vds`'s own
+first (Vds=0) point additionally warm-started from the transfer sweep's
+nearest already-converged Vgs point rather than a cold start.
+
+**Two physics passes attempted mid-session, both backed out for now,
+per explicit user direction to stop iterating against the expensive 2D
+mesh and prototype new physics in the fast 1D diode first**:
+1. A Caughey-Thomas FIELD-dependent (velocity-saturation) mobility model
+   was added (new `mobility_field()`, with the new Jacobian terms its
+   psi-dependence requires) to make Ids-Vds saturate instead of rising
+   linearly forever. It made things worse, not better: Ids-Vgs developed a
+   non-physical peak-and-collapse (peaking at Vgs=1.0V, then falling to
+   ~1/3 of that by Vgs=2.0V - real Ids should never fall as Vgs rises in
+   the linear region), and Ids-Vds at high Vgs/Vds diverged outright (res
+   norm plateauing at a suspicious fixed value, Ids swinging to
+   nonsensical +/-1e9-1e10 A/cm). Backed out; `mobility_field()` is left in
+   the file, unused, for a dedicated future pass.
+2. Replaced it with a simpler, doping-CONCENTRATION-dependent (not field-
+   dependent) mobility model (`mobility_doping()`, standard Caughey-Thomas
+   doping-dependence formula, 300K Si parameters on `core.params.Material`
+   as `mu_*_max/min`, `N_ref_*`, `alpha_*`), evaluated once per node from
+   `mesh.Cdop` and averaged per edge - since it depends only on fixed
+   doping, not the solved potentials, it needs no new Jacobian terms at
+   all (as simple as the original scalar-mobility case). This IS still
+   active in the solver.
+
+**Root-caused, but deliberately left unfixed, the flat-off-state-current
+bug**: the Ids-Vgs transfer curve's off-state floor doesn't fall off
+exponentially with the diffusion-current signature real subthreshold
+behavior should show - it's completely flat, and was found (by direct
+per-edge instrumentation of a converged off-state solve) to be ~100%
+explained by a single spurious mesh edge connecting the drain (and,
+separately, the source) contact directly to a node INSIDE the oxide, at
+the corner where the contact meets the mesa/gate-stack wall. That oxide
+node's phin/phip are pinned to 0 (the "arbitrary but harmless" placeholder
+mentioned above turned out not to be harmless): the edge's current formula
+then computes a large, completely Vgs-independent (and, confirmed
+separately, doping-independent) "current" set entirely by the drain's own
+fixed doping/BC and the pinned oxide value - explaining both the flat-vs-
+Vgs and an earlier, separately-noticed flat-vs-substrate-doping mystery
+from the same root cause. A real fix (excluding every edge touching an
+insulator node from carrying Jn/Jp current at all, in both the residual/
+Jacobian assembly and `solver2d/current.py::contact_current`) was
+implemented and passed its own finite-difference Jacobian check with zero
+diode regression - but it made near-threshold/off-state Newton convergence
+markedly slower and less robust across the WHOLE sweep, not just the one
+corner it targeted (a 26-point sweep that normally takes ~80s took 11+
+minutes and was still hitting `NOT CONVERGED` points when killed). Per
+explicit user direction ("I don't think it should take this long .. stop
+this methodology .. I think I will make the diffusion/leakage current
+model work in a 1D diode first and then come back to this one"), this fix
+was backed out (the masking code is still present in both files, commented
+out with a dated note, not deleted) so the shipped example stays fast and
+its on-state curve stays clean. The known, accepted consequence: the
+shipped `ids_vgs.png`'s off-state region is flat, not exponential - this
+is the next physics item, to be solved in the 1D diode first, then ported
+back here.
+
+**Result, as shipped**: `ids_vgs.png`/`ids_vgs.csv` - clean, monotonic,
+physically sensible on-state transfer curve (Vgs=-0.5V to 2.0V, Vds=0.05V,
+all 26 points converged, res_norm ~1e-6, ~80s total), flat (not yet
+exponential) off-state floor as a known, tracked limitation.
+`main2d_mosfet_sweep.py`'s Ids-Vds output sweep is gated behind
+`RUN_IDS_VDS = False` (not deleted) - it was never reached in a converged,
+trustworthy state this session (needs the still-pending velocity-
+saturation work to even look qualitatively right, since without it Ids-Vds
+never saturates).
+
+**Not done this session**: velocity-saturation Ids-Vds saturation (backed
+out, deferred); the subthreshold/off-state current bug (root-caused,
+deferred to a 1D-diode prototyping pass first, per explicit user
+direction); DIBL, subthreshold-swing degradation, and other short-channel
+effects the user's eventual goal is to study (blocked on the above two
+items landing first).

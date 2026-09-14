@@ -101,7 +101,19 @@ class Domain2D:
         region-wins painter's algorithm as doping_at. Points covered by no
         region (or only by "semiconductor" regions) get the Material's own
         eps_r and is_insulator=False; a point covered by an "insulator"
-        region gets that region's eps_r and is_insulator=True."""
+        region gets that region's eps_r and is_insulator=True.
+
+        An insulator region's membership test is made STRICT (not
+        tolerance-inclusive) on its y1 (semiconductor-facing) edge only -
+        e.g. a mesa oxide's own y1=0 is exactly the substrate's own y0=0,
+        the shared interface line. Using the usual tolerance-inclusive test
+        there would let the insulator (processed after the base substrate
+        region in the painter's-algorithm order) claim that shared line of
+        nodes as ni=0/insulator - wrongly zeroing out the semiconductor's
+        own topmost layer of nodes, exactly where inversion/accumulation
+        charge is concentrated. The other three sides keep the usual
+        inclusive tolerance (no competing semiconductor region touches
+        them, so there's no ambiguity to resolve there)."""
         x = np.asarray(x_cm, dtype=float)
         y = np.asarray(y_cm, dtype=float)
         is_insulator = np.zeros(x.shape, dtype=bool)
@@ -111,14 +123,16 @@ class Domain2D:
         for region in self.regions:
             x0, x1 = region.x_range_cm
             y0, y1 = region.y_range_cm
-            mask = ((x >= x0 - tol_x) & (x <= x1 + tol_x)
-                    & (y >= y0 - tol_y) & (y <= y1 + tol_y))
             if region.kind == "insulator":
+                mask = ((x >= x0 - tol_x) & (x <= x1 + tol_x)
+                        & (y >= y0 - tol_y) & (y < y1))
                 if region.eps_r is None:
                     raise ValueError(f"Region {region.name!r}: kind='insulator' requires eps_r")
                 is_insulator = np.where(mask, True, is_insulator)
                 eps_r = np.where(mask, region.eps_r, eps_r)
             else:
+                mask = ((x >= x0 - tol_x) & (x <= x1 + tol_x)
+                        & (y >= y0 - tol_y) & (y <= y1 + tol_y))
                 is_insulator = np.where(mask, False, is_insulator)
                 eps_r = np.where(mask, mat.eps_r, eps_r)
         return is_insulator, eps_r

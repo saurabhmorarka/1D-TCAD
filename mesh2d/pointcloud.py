@@ -63,44 +63,54 @@ def _domain_pslg(domain):
     region's own boundary - a Planar Straight Line Graph `triangle`
     triangulates conformingly (segments are never crossed).
 
-    A region with y_range_cm[0] < 0 (a mesa's material fill, e.g. an
-    oxide) is handled specially: its top/left/right sides already coincide
-    with the outer polygon's mesa notch (added once, above, not
-    duplicated here) - only its bottom edge (the oxide/semiconductor
-    interface, interior to the domain once the mesa protrudes above it) is
-    a genuinely new interior segment, and it reuses the notch's own corner
-    vertices instead of creating duplicate ones at the same point."""
+    Any of a region's 4 sides that lies entirely on the domain's own outer
+    boundary (domain.boundary_point_role() is non-None at the side's
+    MIDPOINT - e.g. a source/drain region placed flush against the
+    domain's left/right edge, or a mesa oxide's top/side walls) is SKIPPED
+    here - that side is already part of the outer polygon added above, and
+    re-adding it would give `triangle` two exactly-coincident overlapping
+    segments, which is undefined input and was observed to crash the C
+    extension outright (segfault) rather than raise a Python exception.
+    The midpoint (not the two endpoints) is what's tested: a mesa oxide's
+    own y=0 interface side has BOTH its endpoints sitting exactly at the
+    mesa's side-wall corners (which individually do test as "on boundary"
+    - a false positive if only the endpoints were checked), yet the
+    segment connecting them cuts straight across underneath the mesa and
+    is genuinely interior; since every region here is an axis-aligned
+    rectangle, a straight side can only be fully on vs. fully off the
+    boundary (it can't dip in and out along its own length), so the
+    midpoint alone is a sufficient test either way. Only a region's
+    genuinely interior sides (e.g. the diode's p_well's 4 sides, all
+    strictly inside the domain; or a mesa oxide's y=0 interface) get a
+    fresh segment, reusing an existing vertex at either endpoint (from the
+    outer polygon or an earlier region) instead of creating a duplicate
+    coincident one."""
     outer_verts, outer_edges, _ = domain.outer_boundary()
     verts = [tuple(v) for v in outer_verts]
     segs = [tuple(e) for e in outer_edges]
 
-    def find_vertex(pt, tol=1e-9):
+    def find_or_add_vertex(pt, tol=1e-9):
         for k, v in enumerate(verts):
             if abs(v[0] - pt[0]) <= tol and abs(v[1] - pt[1]) <= tol:
                 return k
-        return None
+        verts.append(pt)
+        return len(verts) - 1
 
     def add_rect(x0, y0, x1, y1):
-        base = len(verts)
-        verts.extend([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
-        segs.extend([(base, base + 1), (base + 1, base + 2),
-                     (base + 2, base + 3), (base + 3, base)])
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        for k in range(4):
+            p0, p1 = corners[k], corners[(k + 1) % 4]
+            mid = (0.5 * (p0[0] + p1[0]), 0.5 * (p0[1] + p1[1]))
+            if domain.boundary_point_role(*mid) is not None:
+                continue  # already represented by the outer polygon
+            i0 = find_or_add_vertex(p0)
+            i1 = find_or_add_vertex(p1)
+            segs.append((i0, i1))
 
     for region in domain.regions[1:]:
         x0, x1 = region.x_range_cm
         y0, y1 = region.y_range_cm
-        if y0 < 0.0:
-            # Mesa material region: only the interface (bottom, y=0) edge is new;
-            # its endpoints already exist as outer-polygon vertices.
-            i0 = find_vertex((x0, y1))
-            i1 = find_vertex((x1, y1))
-            if i0 is None or i1 is None:
-                raise ValueError(
-                    f"mesh2d: mesa region {region.name!r} ({x0},{y0})-({x1},{y1}) "
-                    "doesn't align with any domain.top_mesas entry's footprint")
-            segs.append((i0, i1))
-        else:
-            add_rect(x0, y0, x1, y1)
+        add_rect(x0, y0, x1, y1)
 
     return np.array(verts, dtype=float), np.array(segs, dtype=int)
 

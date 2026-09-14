@@ -43,8 +43,11 @@ def sweep_2d(mesh, mat, Va_list, contact_bias_role="anode", verbose=True):
     zero_idx = int(np.argmin(np.abs(Va_arr)))
     results = {}
 
+    def bias_dict(Va):
+        return {c.name: (Va if c.bias_role == contact_bias_role else 0.0) for c in mesh.domain.contacts}
+
     t0 = time.perf_counter()
-    r0 = newton_solve_2d(mesh, mat, Va=float(Va_arr[zero_idx]), contact_bias_role=contact_bias_role)
+    r0 = newton_solve_2d(mesh, mat, bias_dict(float(Va_arr[zero_idx])))
     r0["solve_time_s"] = time.perf_counter() - t0
     results[Va_arr[zero_idx]] = r0
     if verbose:
@@ -57,7 +60,7 @@ def sweep_2d(mesh, mat, Va_list, contact_bias_role="anode", verbose=True):
         for idx in idx_range:
             Va = Va_arr[idx]
             t0 = time.perf_counter()
-            r = newton_solve_2d(mesh, mat, Va=float(Va), contact_bias_role=contact_bias_role,
+            r = newton_solve_2d(mesh, mat, bias_dict(float(Va)),
                                  psi_init=prev["psi"], phin_init=prev["phin"], phip_init=prev["phip"])
             r["solve_time_s"] = time.perf_counter() - t0
             results[Va] = r
